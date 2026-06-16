@@ -17,6 +17,7 @@ let mobTypesRef = {};
 let animalTypeKeysRef = [];
 let animalTypesRef = {};
 let nextNetId = 1;
+const geometryCache = new Map();
 
 export function initFactories({
   THREE,
@@ -64,6 +65,11 @@ export function getAnimalTypeKey(eid) {
   return animalTypeKeysRef[Animal.type[eid]];
 }
 
+function boxGeometry(key, w, h, d) {
+  if (!geometryCache.has(key)) geometryCache.set(key, new threeRef.BoxGeometry(w, h, d));
+  return geometryCache.get(key);
+}
+
 function addKinematicBody(eid, x, y, z, radius, height) {
   addComponent(ecsWorld, eid, Position);
   addComponent(ecsWorld, eid, Velocity);
@@ -102,16 +108,18 @@ export function makeMobMesh(typeKey) {
   const t = mobTypesRef[typeKey];
   const g = new threeRef.Group();
   const bodyMat = new threeRef.MeshLambertMaterial({ color: t.body });
-  const body = new threeRef.Mesh(new threeRef.BoxGeometry(0.7, 1.1, 0.4), bodyMat);
+  const body = new threeRef.Mesh(boxGeometry('mobBody', 0.7, 1.1, 0.4), bodyMat);
   body.position.y = 0.55;
+  const headMat = new threeRef.MeshLambertMaterial({ color: t.head });
   const head = new threeRef.Mesh(
-    new threeRef.BoxGeometry(0.5, 0.5, 0.5),
-    new threeRef.MeshLambertMaterial({ color: t.head })
+    boxGeometry('mobHead', 0.5, 0.5, 0.5),
+    headMat
   );
   head.position.y = 1.35;
   g.add(body);
   g.add(head);
   g.userData.bodyMat = bodyMat;
+  g.userData.disposeMaterials = true;
   return g;
 }
 
@@ -119,17 +127,29 @@ export function makeAnimalMesh(typeKey) {
   const t = animalTypesRef[typeKey];
   const g = new threeRef.Group();
   const bodyMat = new threeRef.MeshLambertMaterial({ color: t.body });
-  const body = new threeRef.Mesh(new threeRef.BoxGeometry(0.6, 0.7, 1.0), bodyMat);
+  const body = new threeRef.Mesh(boxGeometry('animalBody', 0.6, 0.7, 1.0), bodyMat);
   body.position.y = 0.55;
+  const headMat = new threeRef.MeshLambertMaterial({ color: t.head });
   const head = new threeRef.Mesh(
-    new threeRef.BoxGeometry(0.45, 0.45, 0.45),
-    new threeRef.MeshLambertMaterial({ color: t.head })
+    boxGeometry('animalHead', 0.45, 0.45, 0.45),
+    headMat
   );
   head.position.set(0, 0.75, 0.6);
   g.add(body);
   g.add(head);
   g.userData.bodyMat = bodyMat;
+  g.userData.disposeMaterials = true;
   return g;
+}
+
+function disposeOwnedMaterials(root) {
+  if (!root.userData.disposeMaterials) return;
+  root.traverse(obj => {
+    const material = obj.material;
+    if (!material) return;
+    if (Array.isArray(material)) material.forEach(mat => mat.dispose());
+    else material.dispose();
+  });
 }
 
 export function spawnMob({ type, x, y, z, radius, height, netId }) {
@@ -184,6 +204,7 @@ export function removeEcsEntity(eid) {
   const mesh = getMesh(eid);
   if (mesh && sceneRef) {
     sceneRef.remove(mesh);
+    disposeOwnedMaterials(mesh);
   }
   dropMesh(eid);
   removeEntity(ecsWorld, eid);

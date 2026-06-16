@@ -23,9 +23,8 @@ function b64ToU8(b64) {
 export function saveGame(snapshot) {
   try {
     const data = {
-      v: 'ecs-1',
+      v: 'ecs-2',
       seed: snapshot.seed,
-      world: u8ToB64(snapshot.world),
       blockState: snapshot.blockState,
       player: snapshot.player,
       inventory: snapshot.inventory,
@@ -46,8 +45,9 @@ export function loadGame() {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    if (data.v !== 'ecs-1' || !data.world) return null;
-    return { ...data, world: b64ToU8(data.world) };
+    if (data.v === 'ecs-2') return data;
+    if (data.v === 'ecs-1' && data.world) return { ...data, world: b64ToU8(data.world) };
+    return null;
   } catch (e) {
     console.warn('读档失败', e);
     return null;

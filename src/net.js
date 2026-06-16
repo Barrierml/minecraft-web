@@ -6,10 +6,12 @@
 export const MSG = {
   HELLO: 'hello',   // client→host 自报家门
   WELCOME: 'welcome', // host→client 分配信息
-  WORLD: 'world',   // host→client 完整世界(种子+方块base64)
+  WORLD: 'world',   // host→client 完整世界状态(种子+方块改动+功能方块)
   STATE: 'state',   // host→client 玩家/怪物/动物/昼夜快照
   INPUT: 'input',   // client→host 移动与朝向
   BLOCK: 'block',   // 双向 方块破坏/放置
+  DOOR: 'door',     // 双向 门开关
+  CHEST: 'chest',   // 双向 箱子内容
   HIT:   'hit',     // client→host 攻击怪物/动物
   PICKUP: 'pickup', // client→host 拾取掉落物
   CHAT:  'chat',    // 双向 聊天

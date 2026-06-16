@@ -3,6 +3,7 @@ import * as D from './data.js';
 import * as Save from './save.js';
 import * as FX from './fx.js';
 import { Net, MSG } from './net.js';
+import { createNetSession } from './netSession.js';
 import {
   createPlayer, damagePlayer as applyPlayerDamage,
   gainPlayerXP, resetPlayer, respawnPlayer, updatePlayer,
@@ -12,6 +13,8 @@ import { createDayCycle } from './daycycle.js';
 import { createRemotePlayers } from './remotePlayers.js';
 import { createClouds } from './clouds.js';
 import { createHand } from './hand.js';
+import { createHud } from './hud.js';
+import { createKeyState, shouldHandleGameKey } from './input.js';
 import {
   inventory, RECIPES,
   addToInventory as addItemToInventory,
@@ -21,7 +24,7 @@ import {
 import {
   initWorldRuntime, rebuildTerrain, updateBlockTexture,
   keyOf, isSolidAt, surfaceY,
-  openDoors, chests, blockEdits,
+  openDoors, chests,
   clearBlockState, restoreBlockState, snapshotBlockState, applyBlockEdit, applyBlockEdits,
 } from './world.js';
 import { ecsWorld } from './ecs/world.js';
@@ -56,8 +59,6 @@ const {
 } = D;
 // ===== 联机状态（net 层）=====
 const net = new Net();
-let netReady = false;       // 联机会话是否已建立（host 开房或 client 收到 WORLD）
-let lastNetSync = 0;        // 上次发送同步的时间（节流）
 
 // ===== Three.js 场景 =====
     const canvas = document.getElementById('c');
@@ -176,11 +177,8 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
     const HUNGER_DECAY = 0.06;   // 每秒自然下降
     const STARVE_DAMAGE = 1;     // 饥饿归零时每 2 秒掉血
     let gameTime = 0;       // 累计游戏时间（秒），怪物 AI 与回血用
-    const keys = {};
+    const keys = createKeyState(document);
     let locked = false;
-
-    document.addEventListener('keydown', e => { keys[e.code] = true; });
-    document.addEventListener('keyup', e => { keys[e.code] = false; });
 
     // 鼠标视角（指针锁定）
     document.addEventListener('mousemove', e => {
@@ -382,7 +380,7 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
         if (hitId === 17) { openChest(x, y, z); return; }
         if (hitId === 15) {
           const k = keyOf(x, y, z);
-          if (openDoors.has(k)) openDoors.delete(k); else openDoors.add(k);
+          netSession.sendDoor(x, y, z, !openDoors.has(k));
           playSound('place');
           return;
         }
@@ -411,14 +409,8 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
 
     // ===== UI =====
     const overlay = document.getElementById('overlay');
-    const hotbarEl = document.getElementById('hotbar');
-    const infoEl = document.getElementById('info');
-    const healthEl = document.getElementById('health');
-    const hungerEl = document.getElementById('hunger');
     const hurtEl = document.getElementById('hurt');
     const deathEl = document.getElementById('death');
-    const xpFillEl = document.getElementById('xpfill');
-    const xpTextEl = document.getElementById('xptext');
     const chestEl = document.getElementById('chest');
     const chestSlotsEl = document.getElementById('chestSlots');
     const chestInvEl = document.getElementById('chestInv');
@@ -431,13 +423,17 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
       hintTimer = setTimeout(() => hintEl.classList.remove('show'), 1500);
     }
     let selected = 0; // PLACEABLE 中的索引
+    const hud = createHud({
+      player,
+      inventory,
+      placeable: PLACEABLE,
+      blocks: BLOCKS,
+      maxHealth: MAX_HEALTH,
+      maxHunger: MAX_HUNGER,
+    });
 
     // 渲染经验条：当前等级内的进度
-    function renderXP() {
-      const into = player.xp % 100;
-      xpFillEl.style.width = into + '%';
-      xpTextEl.textContent = 'Lv ' + player.level + '  (' + player.xp + ' XP)';
-    }
+    function renderXP() { hud.renderXP(); }
 
     // ===== 箱子存储 UI =====
     let openChestKey = null;
@@ -466,38 +462,30 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
         s.addEventListener('click', onClick);
         return s;
       };
-      chestSlotsEl.innerHTML = '';
+      chestSlotsEl.textContent = '';
       for (const id of Object.keys(store)) {
         if (store[id] > 0) chestSlotsEl.appendChild(mkSlot(id, store[id], () => {
           // 从箱子取出一个到背包
           store[id]--; if (store[id] <= 0) delete store[id];
           addItemToInventory(id, 1);
+          netSession.syncChest(openChestKey);
           renderChest(); renderHotbar();
         }));
       }
-      chestInvEl.innerHTML = '';
+      chestInvEl.textContent = '';
       for (const id of Object.keys(inventory)) {
         if (inventory[id] > 0) chestInvEl.appendChild(mkSlot(id, inventory[id], () => {
           // 从背包存入一个到箱子
           removeFromInventory(id, 1);
           store[id] = (store[id] || 0) + 1;
+          netSession.syncChest(openChestKey);
           renderChest(); renderHotbar();
         }));
       }
     }
 
     // 渲染饥饿值：10 个鸡腿，每个 2 点
-    function renderHunger() {
-      hungerEl.innerHTML = '';
-      const drums = MAX_HUNGER / 2;
-      for (let i = 0; i < drums; i++) {
-        const hp = player.hunger - i * 2;
-        const span = document.createElement('span');
-        span.className = 'drum';
-        span.textContent = hp >= 2 ? '🍗' : (hp === 1 ? '🦴' : '⬛');
-        hungerEl.appendChild(span);
-      }
-    }
+    function renderHunger() { hud.renderHunger(); }
 
     let craftOpen = false;
     let nearTable = false; // 附近是否有工作台
@@ -524,7 +512,7 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
     let bagOpen = false;
     // 渲染背包：列出所有持有物品（含非放置类如工具/肉/矿产），食物可点击食用
     function renderBag() {
-      bagGridEl.innerHTML = '';
+      bagGridEl.textContent = '';
       const ids = Object.keys(inventory).filter(id => inventory[id] > 0);
       if (ids.length === 0) {
         const tip = document.createElement('div');
@@ -574,7 +562,7 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
     }
 
     function renderCraft() {
-      craftListEl.innerHTML = '';
+      craftListEl.textContent = '';
       for (const r of RECIPES) {
         const ok = canCraft(r);
         const row = document.createElement('div');
@@ -586,8 +574,11 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
         txt.className = 'txt';
         const needs = Object.entries(r.inputs)
           .map(([id, n]) => `${itemName(id)}×${n}`).join(' + ');
-        txt.innerHTML = `${r.name} ×${r.count}` +
-          `<div class="need">需要: ${needs}${r.table ? ' · 工作台' : ''}</div>`;
+        txt.textContent = `${r.name} ×${r.count}`;
+        const need = document.createElement('div');
+        need.className = 'need';
+        need.textContent = `需要: ${needs}${r.table ? ' · 工作台' : ''}`;
+        txt.appendChild(need);
         row.appendChild(sw); row.appendChild(txt);
         if (ok) row.addEventListener('click', () => doCraft(r));
         craftListEl.appendChild(row);
@@ -605,6 +596,7 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
       }
     }
     document.addEventListener('keydown', e => {
+      if (!shouldHandleGameKey(e)) return;
       // Tab 打开/关闭背包（阻止默认的焦点切换）
       if (e.code === 'Tab') {
         e.preventDefault();
@@ -633,17 +625,7 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
       }
     });
     // 渲染血量：10 颗心，每颗 2 点；满/半/空三态
-    function renderHealth() {
-      healthEl.innerHTML = '';
-      const hearts = MAX_HEALTH / 2;
-      for (let i = 0; i < hearts; i++) {
-        const hp = player.health - i * 2; // 这颗心对应的血量
-        const span = document.createElement('span');
-        span.className = 'heart';
-        span.textContent = hp >= 2 ? '❤️' : (hp === 1 ? '💔' : '🖤');
-        healthEl.appendChild(span);
-      }
-    }
+    function renderHealth() { hud.renderHealth(); }
 
     // 死亡屏：点击复活——满血、回出生点、清空怪物重新生成
     deathEl.addEventListener('click', () => {
@@ -663,31 +645,11 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
     });
 
     // 渲染热键栏：每个槽位显示方块颜色色块 + 名称 + 持有数量
-    function renderHotbar() {
-      hotbarEl.innerHTML = '';
-      PLACEABLE.forEach((id, i) => {
-        const count = inventory[id] || 0;
-        const slot = document.createElement('div');
-        slot.className = 'slot' + (i === selected ? ' active' : '') + (count === 0 ? ' empty' : '');
-        const sw = document.createElement('div');
-        sw.className = 'sw';
-        sw.style.background = '#' + BLOCKS[id].top.toString(16).padStart(6, '0');
-        if (count > 0) {
-          const cnt = document.createElement('span');
-          cnt.className = 'count';
-          cnt.textContent = count;
-          sw.appendChild(cnt);
-        }
-        const label = document.createElement('span');
-        label.textContent = (i + 1) + ' ' + BLOCKS[id].name;
-        slot.appendChild(sw);
-        slot.appendChild(label);
-        hotbarEl.appendChild(slot);
-      });
-    }
+    function renderHotbar() { hud.renderHotbar(selected); }
 
     // 数字键 1-7 选方块；滚轮循环切换
     document.addEventListener('keydown', e => {
+      if (!shouldHandleGameKey(e)) return;
       const n = parseInt(e.key, 10);
       if (n >= 1 && n <= PLACEABLE.length) { selected = n - 1; renderHotbar(); }
     });
@@ -735,14 +697,53 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
     net.onStatus = (t) => netMsg(t);
     net.onPeerLeave = (pid) => { remotePlayers.remove(pid); updateNetbar(); };
 
+    const netSession = createNetSession({
+      net,
+      remotePlayers,
+      player,
+      dayCycle,
+      ecsWorld,
+      world,
+      generateWorld,
+      applyBlockEdit,
+      applyBlockEdits,
+      clearMobs,
+      clearAnimals,
+      clearDrops,
+      syncNetMobs,
+      syncNetAnimals,
+      syncNetDrops,
+      snapshotMobs,
+      snapshotAnimals,
+      snapshotDrops,
+      mobCtx,
+      animalCtx,
+      getBlock,
+      dropOf,
+      spawnDrop,
+      despawnDrop,
+      findByNetId,
+      damageMob,
+      killMob,
+      damageAnimal,
+      killAnimal,
+      updateNetbar,
+      getSeed: () => currentSeed,
+      setSeed: seed => { currentSeed = seed; },
+      getGameTime: () => gameTime,
+      setGameTime: value => { gameTime = value; },
+      attackDamage: ATTACK_DAMAGE,
+      air: AIR,
+    });
+
     hostBtnEl.addEventListener('click', (e) => {
       e.stopPropagation();
       if (typeof window.Peer === 'undefined') { netMsg('PeerJS 未加载，检查网络'); return; }
       netMsg('正在创建房间…');
       net.host((roomId) => {
-        netReady = true;
+        netSession.markReady();
         netMsg('房间号：' + roomId + ' （发给朋友）');
-        setupHostHandlers();
+        netSession.setupHostHandlers();
         updateNetbar();
       });
     });
@@ -752,116 +753,12 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
       const room = roomInputEl.value.trim().toUpperCase();
       if (room.length < 4) { netMsg('请输入房间号'); return; }
       netMsg('正在加入 ' + room + ' …');
-      setupClientHandlers();
+      netSession.setupClientHandlers(() => netMsg('世界已同步，点击开始'));
       net.join(room, () => { netMsg('已连接，等待世界…'); });
     });
 
-    // 房主：注册收到客户端消息的处理器
-    function setupHostHandlers() {
-      net.onPeerJoin = (pid) => {
-        // 新客户端：发完整世界（种子 + 累计改动 + 当前昼夜）
-        net.sendTo(pid, MSG.WORLD, { seed: currentSeed, edits: blockEdits, dayTime: dayCycle.getTime(), gameTime });
-        remotePlayers.ensure(pid);
-        updateNetbar();
-      };
-      net.on(MSG.HELLO, (d, from) => { remotePlayers.ensure(from); updateNetbar(); });
-      net.on(MSG.INPUT, (d, from) => {
-        const rp = remotePlayers.ensure(from);
-        rp.target.set(d.x, d.y, d.z); rp.yaw = d.yaw;
-      });
-      net.on(MSG.BLOCK, (d, from) => {
-        const broken = getBlock(d.x, d.y, d.z);
-        applyBlockEdit(d.x, d.y, d.z, d.id);
-        if (d.id === AIR) {
-          const drop = dropOf(broken);
-          if (drop !== null) spawnDrop(d.x, d.y, d.z, drop);
-        }
-        net.broadcast(MSG.BLOCK, d, from); // 转发给其他客户端
-      });
-      net.on(MSG.HIT, (d, from) => {
-        // 客户端攻击生物：房主按稳定实体 id 结算。
-        if (d.kind === 'mob') {
-          const eid = findByNetId(ecsWorld, 'mob', d.id);
-          if (eid >= 0) damageMob(eid, ATTACK_DAMAGE, { onKill: e => killMob(e, mobCtx()) });
-        } else if (d.kind === 'animal') {
-          const eid = findByNetId(ecsWorld, 'animal', d.id);
-          if (eid >= 0) damageAnimal(eid, ATTACK_DAMAGE, { player, onKill: e => killAnimal(e, animalCtx()) });
-        }
-      });
-      net.on(MSG.PICKUP, (d) => {
-        const eid = findByNetId(ecsWorld, 'drop', d.id);
-        if (eid >= 0) despawnDrop(eid);
-      });
-    }
-
-    // 客户端：注册收到房主消息的处理器
-    function setupClientHandlers() {
-      net.on(MSG.WORLD, (d) => {
-        currentSeed = d.seed;
-        for (let i = 0; i < world.length; i++) world[i] = 0;
-        generateWorld(d.seed);
-        applyBlockEdits(d.edits || {});
-        clearMobs(ecsWorld);
-        clearAnimals(ecsWorld);
-        clearDrops(ecsWorld);
-        dayCycle.setTime(d.dayTime ?? 0.15); gameTime = d.gameTime ?? 0;
-        netReady = true;
-        netMsg('世界已同步，点击开始');
-        updateNetbar();
-      });
-      net.on(MSG.BLOCK, (d) => applyBlockEdit(d.x, d.y, d.z, d.id));
-      net.on(MSG.STATE, (d) => applyHostState(d));
-    }
-
-    // 客户端：应用房主下发的快照（玩家/怪物/动物/昼夜）
-    function applyHostState(s) {
-      dayCycle.setTime(s.dayTime ?? dayCycle.getTime());
-      // 远程玩家（含房主，键 'host'）
-      const seen = new Set();
-      for (const p of s.players) {
-        if (p.id === net.selfId) continue; // 跳过自己
-        seen.add(p.id);
-        const rp = remotePlayers.ensure(p.id);
-        rp.target.set(p.x, p.y, p.z); rp.yaw = p.yaw;
-      }
-      for (const pid of remotePlayers.ids()) if (!seen.has(pid)) remotePlayers.remove(pid);
-      // 怪物：按下发列表重建（客户端不跑 AI）
-      syncNetMobs(ecsWorld, s.mobs, mobCtx());
-      syncNetAnimals(ecsWorld, s.animals, animalCtx());
-      syncNetDrops(ecsWorld, s.drops);
-      updateNetbar();
-    }
-
-    // 房主：把当前状态打包广播给所有客户端（10Hz）
-    function broadcastState() {
-      const players = [{ id: 'host', x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw }];
-      for (const [pid, rp] of remotePlayers.entries()) {
-        players.push({ id: pid, x: rp.target.x, y: rp.target.y, z: rp.target.z, yaw: rp.yaw });
-      }
-      const mobList = snapshotMobs(ecsWorld);
-      const aniList = snapshotAnimals(ecsWorld);
-      const dropList = snapshotDrops(ecsWorld);
-      net.broadcast(MSG.STATE, { players, mobs: mobList, animals: aniList, drops: dropList, dayTime: dayCycle.getTime() });
-    }
-
-    // 每帧推进联机同步（位置上报 / 状态广播 / 远程插值）
-    function netTick(dt) {
-      if (!net.isMultiplayer()) return;
-      remotePlayers.update(dt);
-      lastNetSync += dt;
-      if (lastNetSync < 0.1) return; // 10Hz
-      lastNetSync = 0;
-      if (net.isHost()) {
-        broadcastState();
-      } else if (net.isClient()) {
-        net.send(MSG.INPUT, { x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw });
-      }
-    }
-
-    function updateInfo() {
-      const p = player.pos;
-      infoEl.innerHTML = `坐标 ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}<br>` +
-        `当前方块: ${BLOCKS[PLACEABLE[selected]].name}`;
+    function updateInfo(dt) {
+      hud.updateInfo(selected, dt);
     }
 
     // ===== 主循环 =====
@@ -955,7 +852,7 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
         const dt = Math.min((now - last) / 1000, 0.05); // 限制最大步长，防卡顿穿墙
         last = now;
         if (locked) update(dt);
-        netTick(dt); // 联机同步（即使未锁定也插值远程玩家）
+        netSession.netTick(dt); // 联机同步（即使未锁定也插值远程玩家）
         // 昼夜与云持续运转（即使玩家死亡，世界依然流动）
         dayCycle.update(dt);
         clouds.update(dt);
@@ -963,7 +860,7 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
         // 纹理缓动：让方块表面颗粒微微流动，制造"活"的氛围
         updateBlockTexture(dt);
         updateDamageTexts(dt); // 伤害飘字淡出
-        updateInfo();
+        updateInfo(dt);
         // 自动存档：每 30 秒一次（游戏进行中且未死亡）
         if (locked && !player.dead && gameTime - lastAutoSave > 30) {
           lastAutoSave = gameTime;
@@ -1006,11 +903,16 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
       refreshAllUI();
     }
 
-    // 应用读档数据：恢复世界数组与其余状态
+    // 应用读档数据：恢复种子世界、方块改动与其余状态
     function applyLoadedSave(data) {
       currentSeed = data.seed ?? 1337;
       if (data.world) {
         for (let i = 0; i < world.length; i++) world[i] = data.world[i] || 0;
+        rebuildTerrain();
+      } else {
+        world.fill(0);
+        generateWorld(currentSeed);
+        applyBlockEdits(data.blockState?.edits || {});
       }
       // 恢复玩家
       Object.assign(player, {
@@ -1025,19 +927,17 @@ let lastNetSync = 0;        // 上次发送同步的时间（节流）
       restoreInventory(data.inventory || {});
       restoreBlockState(data.blockState);
       hydrateEcs(data.ecs, { clearDrops, world: ecsWorld });
-      rebuildTerrain();
       refreshAllUI();
     }
 
     function refreshAllUI() {
-      renderHotbar(); renderHealth(); renderHunger(); renderXP();
+      hud.renderAll(selected);
     }
 
     // 收集当前状态用于存档
     function makeSnapshot() {
       return {
         seed: currentSeed,
-        world,
         player: {
           px: player.pos.x, py: player.pos.y, pz: player.pos.z,
           health: player.health, hunger: player.hunger,
