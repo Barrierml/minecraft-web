@@ -136,6 +136,10 @@
   #overlay input { padding: 8px 12px; border-radius: 6px; border: 1px solid #888; background: #222; color: #fff; font-size: 14px; width: 160px; }
   #overlay .btn { padding: 8px 16px; border: 2px solid #fff; border-radius: 6px; font-size: 14px; cursor: pointer; }
   #overlay .btn:hover { background: rgba(255,255,255,0.15); }
+  #netbar { position: fixed; top: 8px; right: 10px; z-index: 30; background: rgba(0,0,0,0.55);
+    color: #aef; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;
+    border: 1px solid rgba(120,200,255,0.4); }
+  #netbar.hidden { display: none; }
   /* 箱子面板 */
   #chest {
     position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
@@ -179,6 +183,7 @@
   <canvas id="c"></canvas>
   <div id="crosshair"></div>
   <div id="info"></div>
+  <div id="netbar" class="hidden"></div>
   <div id="hotbar"></div>
   <div id="health"></div>
   <div id="hunger"></div>
@@ -218,8 +223,15 @@
       <div class="btn" id="newGameBtn">新世界</div>
     </div>
     <p style="font-size:12px;opacity:0.6">有存档会自动继续；点「新世界」用种子重开（会覆盖存档）</p>
+    <div class="seedrow" style="margin-top:14px">
+      <div class="btn" id="hostBtn">🌐 创建房间</div>
+      <input id="roomInput" type="text" placeholder="房间号" maxlength="6" style="width:110px;text-transform:uppercase">
+      <div class="btn" id="joinBtn">加入</div>
+    </div>
+    <p id="netMsg" style="font-size:12px;opacity:0.75;min-height:16px"></p>
   </div>
 
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script type="importmap">
   {
     "imports": {

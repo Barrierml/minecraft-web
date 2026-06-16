@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import * as D from './data.js';
 import * as Save from './save.js';
 import * as FX from './fx.js';
+import { Net, MSG } from './net.js';
 // 把 data.js 的导出解构到本地名字，保持原代码不变
 const {
   WORLD_W, WORLD_H, WORLD_D, SEA_LEVEL,
@@ -17,6 +18,12 @@ const {
 } = D;
 // buildMesh 需要 THREE，包一层
 function buildMesh() { return D.buildMesh(THREE); }
+
+// ===== 联机状态（net 层）=====
+const net = new Net();
+const remotePlayers = {};   // peerId → {pos:Vector3, target:Vector3, yaw, mesh, name}
+let netReady = false;       // 联机会话是否已建立（host 开房或 client 收到 WORLD）
+let lastNetSync = 0;        // 上次发送同步的时间（节流）
 
 // ===== 功能方块状态（game 层）=====
 const openDoors = new Set();          // 记录已打开的门坐标键 "x,y,z"
@@ -420,6 +427,41 @@ function isSolidAt(x, y, z) {
       return g;
     }
 
+    // ===== 远程玩家网格（联机）=====
+    function makeRemotePlayerMesh() {
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, 0.35),
+        new THREE.MeshLambertMaterial({ color: 0x3a7bd5 }));
+      body.position.y = 0.5;
+      const head = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 0.45),
+        new THREE.MeshLambertMaterial({ color: 0xe0ac69 }));
+      head.position.y = 1.25;
+      g.add(body); g.add(head);
+      return g;
+    }
+    function ensureRemotePlayer(pid) {
+      if (remotePlayers[pid]) return remotePlayers[pid];
+      const mesh = makeRemotePlayerMesh();
+      scene.add(mesh);
+      const rp = { pos: new THREE.Vector3(), target: new THREE.Vector3(), yaw: 0, mesh };
+      remotePlayers[pid] = rp;
+      return rp;
+    }
+    function removeRemotePlayer(pid) {
+      const rp = remotePlayers[pid];
+      if (rp) { scene.remove(rp.mesh); delete remotePlayers[pid]; }
+    }
+    // 平滑插值远程玩家到目标位置（每帧调用）
+    function updateRemotePlayers(dt) {
+      for (const pid in remotePlayers) {
+        const rp = remotePlayers[pid];
+        rp.pos.lerp(rp.target, Math.min(1, dt * 12));
+        // pos 是眼睛高度，模型脚底要下移 PLAYER_HEIGHT
+        rp.mesh.position.set(rp.pos.x, rp.pos.y - PLAYER_HEIGHT, rp.pos.z);
+        rp.mesh.rotation.y = rp.yaw;
+      }
+    }
+
     // 在玩家周围一定距离外随机生成一个怪物（随机类型）
     function spawnMob() {
       // 在世界内随机选一个远离玩家的水平点
@@ -765,7 +807,9 @@ function isSolidAt(x, y, z) {
             // 击退：把怪物沿玩家朝向推开
             const kb = new THREE.Vector3(-Math.sin(player.yaw), 0, -Math.cos(player.yaw)).multiplyScalar(4);
             m.vel.x += kb.x; m.vel.z += kb.z; m.vel.y += 3;
-            if (m.health <= 0) {
+            if (net.isClient()) {
+              net.send(MSG.HIT, { kind: 'mob', i: mi }); // 客户端：交给房主结算
+            } else if (m.health <= 0) {
               dropMobLoot(m);            // 死亡掉落
               playSound('kill');
               gainXP(XP_PER_MOB);        // 击杀得经验
@@ -786,7 +830,9 @@ function isSolidAt(x, y, z) {
             // 动物被打会朝远离玩家方向逃（改游荡朝向）
             a.wanderDir = Math.atan2(a.pos.x - player.pos.x, a.pos.z - player.pos.z);
             a.wanderTimer = 3;
-            if (a.health <= 0) { playSound('kill'); killAnimal(ai); }
+            if (net.isClient()) {
+              net.send(MSG.HIT, { kind: 'animal', i: ai });
+            } else if (a.health <= 0) { playSound('kill'); killAnimal(ai); }
             return;
           }
         }
@@ -796,6 +842,7 @@ function isSolidAt(x, y, z) {
         const [x, y, z] = r.hit;
         const broken = getBlock(x, y, z);
         setBlock(x, y, z, AIR);
+        if (net.isMultiplayer()) { blockEdits[keyOf(x, y, z)] = AIR; net.send(MSG.BLOCK, { x, y, z, id: AIR }); }
         // 功能方块清理：火把光源、门开启状态、箱子内容
         if (broken === 14) removeTorchLight(x, y, z);
         if (broken === 15) openDoors.delete(keyOf(x, y, z));
@@ -837,6 +884,7 @@ function isSolidAt(x, y, z) {
         inventory[placeId]--;
         renderHotbar();
         setBlock(px, py, pz, placeId);
+        if (net.isMultiplayer()) { blockEdits[keyOf(px, py, pz)] = placeId; net.send(MSG.BLOCK, { x: px, y: py, z: pz, id: placeId }); }
         if (isLight(placeId)) addTorchLight(px, py, pz); // 火把发光
         playSound('place');
         rebuildTerrain();
@@ -1105,8 +1153,7 @@ function isSolidAt(x, y, z) {
       player.dead = false;
       player.pos.set(WORLD_W / 2, WORLD_H, WORLD_D / 2);
       player.vel.set(0, 0, 0);
-      while (mobs.length) killMob(0);
-      ensureMobs();
+      if (!net.isClient()) { while (mobs.length) killMob(0); ensureMobs(); }
       renderHealth();
       deathEl.classList.add('hidden');
       canvas.requestPointerLock();
@@ -1151,8 +1198,14 @@ function isSolidAt(x, y, z) {
     // 点击遮罩进入游戏（但点种子输入框/新世界按钮时不进入）
     const seedInputEl = document.getElementById('seedInput');
     const newGameBtnEl = document.getElementById('newGameBtn');
+    const hostBtnEl = document.getElementById('hostBtn');
+    const joinBtnEl = document.getElementById('joinBtn');
+    const roomInputEl = document.getElementById('roomInput');
+    const netMsgEl = document.getElementById('netMsg');
+    const netbarEl = document.getElementById('netbar');
+    const noStart = new Set([seedInputEl, newGameBtnEl, hostBtnEl, joinBtnEl, roomInputEl]);
     overlay.addEventListener('click', (e) => {
-      if (e.target === seedInputEl || e.target === newGameBtnEl) return; // 这些有自己的处理
+      if (noStart.has(e.target)) return; // 这些有自己的处理
       initAudio();
       canvas.requestPointerLock();
     });
@@ -1167,6 +1220,179 @@ function isSolidAt(x, y, z) {
       canvas.requestPointerLock();
       flashHint('新世界 · 种子 ' + seed);
     });
+
+    // ===== 联机 UI 与会话 =====
+    function netMsg(t) { if (netMsgEl) netMsgEl.textContent = t; }
+    function updateNetbar() {
+      if (!net.isMultiplayer()) { netbarEl.classList.add('hidden'); return; }
+      netbarEl.classList.remove('hidden');
+      const role = net.isHost() ? '房主' : '客机';
+      const n = net.isHost() ? (net.conns.size + 1) : (Object.keys(remotePlayers).length + 1);
+      netbarEl.textContent = `🌐 ${role} · 房间 ${net.roomId} · ${n} 人`;
+    }
+    net.onStatus = (t) => netMsg(t);
+    net.onPeerLeave = (pid) => { removeRemotePlayer(pid); updateNetbar(); };
+
+    hostBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof window.Peer === 'undefined') { netMsg('PeerJS 未加载，检查网络'); return; }
+      netMsg('正在创建房间…');
+      net.host((roomId) => {
+        netReady = true;
+        netMsg('房间号：' + roomId + ' （发给朋友）');
+        setupHostHandlers();
+        updateNetbar();
+      });
+    });
+    joinBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof window.Peer === 'undefined') { netMsg('PeerJS 未加载，检查网络'); return; }
+      const room = roomInputEl.value.trim().toUpperCase();
+      if (room.length < 4) { netMsg('请输入房间号'); return; }
+      netMsg('正在加入 ' + room + ' …');
+      setupClientHandlers();
+      net.join(room, () => { netMsg('已连接，等待世界…'); });
+    });
+
+    // 累计的方块改动（host 维护，新客户端加入时补发）："x,y,z" -> blockId
+    const blockEdits = {};
+    // 统一的方块改动应用：更新世界 + 功能方块附属状态 + 重建网格
+    function applyNetBlock(x, y, z, id) {
+      const prev = getBlock(x, y, z);
+      setBlock(x, y, z, id);
+      if (prev === 14 && id !== 14) removeTorchLight(x, y, z);
+      if (id === 14) addTorchLight(x, y, z);
+      if (prev === 15 && id !== 15) openDoors.delete(keyOf(x, y, z));
+      if (prev === 17 && id !== 17) delete chests[keyOf(x, y, z)];
+      blockEdits[keyOf(x, y, z)] = id;
+      rebuildTerrain();
+    }
+
+    // 房主：注册收到客户端消息的处理器
+    function setupHostHandlers() {
+      net.onPeerJoin = (pid) => {
+        // 新客户端：发完整世界（种子 + 累计改动 + 当前昼夜）
+        net.sendTo(pid, MSG.WORLD, { seed: currentSeed, edits: blockEdits, dayTime, gameTime });
+        ensureRemotePlayer(pid);
+        updateNetbar();
+      };
+      net.on(MSG.HELLO, (d, from) => { ensureRemotePlayer(from); updateNetbar(); });
+      net.on(MSG.INPUT, (d, from) => {
+        const rp = ensureRemotePlayer(from);
+        rp.target.set(d.x, d.y, d.z); rp.yaw = d.yaw;
+      });
+      net.on(MSG.BLOCK, (d, from) => {
+        applyNetBlock(d.x, d.y, d.z, d.id);
+        net.broadcast(MSG.BLOCK, d, from); // 转发给其他客户端
+      });
+      net.on(MSG.HIT, (d, from) => {
+        // 客户端攻击怪物：房主结算（按 index 容错）
+        if (d.kind === 'mob' && mobs[d.i]) {
+          const m = mobs[d.i]; m.health -= ATTACK_DAMAGE; m.hitFlash = 0.18;
+          if (m.health <= 0) { dropMobLoot(m); killMob(d.i); }
+        } else if (d.kind === 'animal' && animals[d.i]) {
+          const a = animals[d.i]; a.health -= ATTACK_DAMAGE;
+          if (a.health <= 0) killAnimal(d.i);
+        }
+      });
+    }
+
+    // 客户端：注册收到房主消息的处理器
+    function setupClientHandlers() {
+      net.on(MSG.WORLD, (d) => {
+        currentSeed = d.seed;
+        for (let i = 0; i < world.length; i++) world[i] = 0;
+        generateWorld(d.seed);
+        for (const k in (d.edits || {})) {
+          const [x, y, z] = k.split(',').map(Number);
+          setBlock(x, y, z, d.edits[k]);
+        }
+        dayTime = d.dayTime ?? 0.15; gameTime = d.gameTime ?? 0;
+        rebuildTerrain();
+        netReady = true;
+        netMsg('世界已同步，点击开始');
+        updateNetbar();
+      });
+      net.on(MSG.BLOCK, (d) => applyNetBlock(d.x, d.y, d.z, d.id));
+      net.on(MSG.STATE, (d) => applyHostState(d));
+    }
+
+    // 客户端：应用房主下发的快照（玩家/怪物/动物/昼夜）
+    function applyHostState(s) {
+      dayTime = s.dayTime;
+      // 远程玩家（含房主，键 'host'）
+      const seen = new Set();
+      for (const p of s.players) {
+        if (p.id === net.selfId) continue; // 跳过自己
+        seen.add(p.id);
+        const rp = ensureRemotePlayer(p.id);
+        rp.target.set(p.x, p.y, p.z); rp.yaw = p.yaw;
+      }
+      for (const pid in remotePlayers) if (!seen.has(pid)) removeRemotePlayer(pid);
+      // 怪物：按下发列表重建（客户端不跑 AI）
+      syncNetMobs(s.mobs);
+      syncNetAnimals(s.animals);
+      updateNetbar();
+    }
+
+    // 客户端：用房主快照重建怪物/动物 mesh（不跑 AI，只渲染）。
+    // 复用 mobs/animals 数组本身（mesh 在 scene 里），按下发数量增删。
+    function syncNetMobs(list) {
+      while (mobs.length > list.length) killMob(mobs.length - 1);
+      for (let i = 0; i < list.length; i++) {
+        const d = list[i];
+        if (!mobs[i] || mobs[i].type !== d.type) {
+          if (mobs[i]) killMob(i);
+          const mesh = makeMobMesh(d.type);
+          scene.add(mesh);
+          mobs[i] = { type: d.type, pos: new THREE.Vector3(), vel: new THREE.Vector3(),
+            health: d.h, onGround: true, attackCd: 0, hitFlash: 0, mesh };
+        }
+        mobs[i].pos.set(d.x, d.y, d.z);
+        mobs[i].mesh.position.set(d.x, d.y - MOB_HEIGHT, d.z);
+      }
+    }
+    function syncNetAnimals(list) {
+      while (animals.length > list.length) killAnimal(animals.length - 1);
+      for (let i = 0; i < list.length; i++) {
+        const d = list[i];
+        if (!animals[i] || animals[i].type !== d.type) {
+          if (animals[i]) killAnimal(i);
+          const mesh = makeAnimalMesh(d.type);
+          scene.add(mesh);
+          animals[i] = { type: d.type, pos: new THREE.Vector3(), vel: new THREE.Vector3(),
+            health: d.h, onGround: true, hitFlash: 0, wanderDir: 0, wanderTimer: 0, mesh };
+        }
+        animals[i].pos.set(d.x, d.y, d.z);
+        animals[i].mesh.position.set(d.x, d.y - MOB_HEIGHT, d.z);
+      }
+    }
+
+    // 房主：把当前状态打包广播给所有客户端（10Hz）
+    function broadcastState() {
+      const players = [{ id: 'host', x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw }];
+      for (const pid in remotePlayers) {
+        const rp = remotePlayers[pid];
+        players.push({ id: pid, x: rp.target.x, y: rp.target.y, z: rp.target.z, yaw: rp.yaw });
+      }
+      const mobList = mobs.map(m => ({ type: m.type, x: m.pos.x, y: m.pos.y, z: m.pos.z, h: m.health }));
+      const aniList = animals.map(a => ({ type: a.type, x: a.pos.x, y: a.pos.y, z: a.pos.z, h: a.health }));
+      net.broadcast(MSG.STATE, { players, mobs: mobList, animals: aniList, dayTime });
+    }
+
+    // 每帧推进联机同步（位置上报 / 状态广播 / 远程插值）
+    function netTick(dt) {
+      if (!net.isMultiplayer()) return;
+      updateRemotePlayers(dt);
+      lastNetSync += dt;
+      if (lastNetSync < 0.1) return; // 10Hz
+      lastNetSync = 0;
+      if (net.isHost()) {
+        broadcastState();
+      } else if (net.isClient()) {
+        net.send(MSG.INPUT, { x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw });
+      }
+    }
 
     function updateInfo() {
       const p = player.pos;
@@ -1254,10 +1480,12 @@ function isSolidAt(x, y, z) {
             if (getBlock(px + dx, py + dyy, pz + dz) === 12) foundTable = true;
       nearTable = foundTable;
 
-      // 2.6) 推进怪物 AI
-      updateMobs(dt);
-      // 2.65) 推进被动动物
-      updateAnimals(dt);
+      // 2.6) 推进怪物 AI（联机时仅房主跑；客户端渲染房主下发的快照）
+      if (!net.isClient()) {
+        updateMobs(dt);
+        // 2.65) 推进被动动物
+        updateAnimals(dt);
+      }
 
       // 2.7) 推进掉落物（重力/拾取/超时）
       updateDrops(dt);
@@ -1279,6 +1507,7 @@ function isSolidAt(x, y, z) {
         const dt = Math.min((now - last) / 1000, 0.05); // 限制最大步长，防卡顿穿墙
         last = now;
         if (locked) update(dt);
+        netTick(dt); // 联机同步（即使未锁定也插值远程玩家）
         // 昼夜与云持续运转（即使玩家死亡，世界依然流动）
         updateDayCycle(dt);
         updateClouds(dt);
