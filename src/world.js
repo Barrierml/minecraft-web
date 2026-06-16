@@ -8,9 +8,11 @@ export const chests = {};
 export const torchLights = {};
 export const blockEdits = {};
 
+const CHUNK_SIZE = 16;
+
 let sceneRef = null;
 let threeRef = null;
-let terrainMesh = null;
+const terrainChunks = new Map();
 let terrainMat = null;
 let blockTexture = null;
 
@@ -49,20 +51,86 @@ export function updateBlockTexture(dt) {
   if (blockTexture) blockTexture.offset.x = (blockTexture.offset.x + dt * 0.02) % 1;
 }
 
+function chunkKey(cx, cz) {
+  return cx + ',' + cz;
+}
+
+function disposeTerrainMesh(mesh) {
+  if (!mesh) return;
+  sceneRef.remove(mesh);
+  mesh.geometry.dispose();
+}
+
+function rebuildTerrainChunk(cx, cz) {
+  if (!sceneRef || !threeRef || !terrainMat) return;
+  const maxCx = Math.ceil(D.WORLD_W / CHUNK_SIZE);
+  const maxCz = Math.ceil(D.WORLD_D / CHUNK_SIZE);
+  if (cx < 0 || cz < 0 || cx >= maxCx || cz >= maxCz) return;
+
+  const k = chunkKey(cx, cz);
+  disposeTerrainMesh(terrainChunks.get(k));
+  const x0 = cx * CHUNK_SIZE;
+  const z0 = cz * CHUNK_SIZE;
+  const geometry = D.buildMesh(threeRef, {
+    x0,
+    x1: x0 + CHUNK_SIZE,
+    z0,
+    z1: z0 + CHUNK_SIZE,
+  });
+  if (geometry.getAttribute('position').count === 0) {
+    geometry.dispose();
+    terrainChunks.delete(k);
+    return;
+  }
+
+  const mesh = new threeRef.Mesh(geometry, terrainMat);
+  sceneRef.add(mesh);
+  terrainChunks.set(k, mesh);
+}
+
 export function rebuildTerrain() {
   if (!sceneRef || !threeRef || !terrainMat) return;
-  if (terrainMesh) {
-    sceneRef.remove(terrainMesh);
-    terrainMesh.geometry.dispose();
+  for (const mesh of terrainChunks.values()) disposeTerrainMesh(mesh);
+  terrainChunks.clear();
+  const chunkCols = Math.ceil(D.WORLD_W / CHUNK_SIZE);
+  const chunkRows = Math.ceil(D.WORLD_D / CHUNK_SIZE);
+  for (let cz = 0; cz < chunkRows; cz++) {
+    for (let cx = 0; cx < chunkCols; cx++) rebuildTerrainChunk(cx, cz);
   }
-  terrainMesh = new threeRef.Mesh(D.buildMesh(threeRef), terrainMat);
-  sceneRef.add(terrainMesh);
+}
+
+function rebuildAroundBlock(x, z) {
+  const cx = Math.floor(x / CHUNK_SIZE);
+  const cz = Math.floor(z / CHUNK_SIZE);
+  const keys = new Set([chunkKey(cx, cz)]);
+  if (x % CHUNK_SIZE === 0) keys.add(chunkKey(cx - 1, cz));
+  if (x % CHUNK_SIZE === CHUNK_SIZE - 1) keys.add(chunkKey(cx + 1, cz));
+  if (z % CHUNK_SIZE === 0) keys.add(chunkKey(cx, cz - 1));
+  if (z % CHUNK_SIZE === CHUNK_SIZE - 1) keys.add(chunkKey(cx, cz + 1));
+  for (const k of keys) {
+    const [ccx, ccz] = k.split(',').map(Number);
+    rebuildTerrainChunk(ccx, ccz);
+  }
 }
 
 export function isSolidAt(x, y, z) {
   const id = D.getBlock(x, y, z);
   if (id === 15 && openDoors.has(keyOf(x, y, z))) return false;
   return D.isSolid(id);
+}
+
+export function setDoorOpen(x, y, z, open) {
+  const k = keyOf(x, y, z);
+  if (open) openDoors.add(k);
+  else openDoors.delete(k);
+}
+
+export function setChestContents(key, contents = {}) {
+  chests[key] = { ...contents };
+}
+
+export function snapshotChest(key) {
+  return { ...(chests[key] || {}) };
 }
 
 export function surfaceY(x, z) {
@@ -105,7 +173,7 @@ export function clearBlockState() {
 
 export function restoreBlockState(state = {}) {
   clearBlockState();
-  Object.assign(chests, state.chests || {});
+  for (const k in state.chests || {}) chests[k] = { ...state.chests[k] };
   (state.openDoors || []).forEach(k => openDoors.add(k));
   Object.assign(blockEdits, state.edits || {});
   (state.torches || []).forEach(k => {
@@ -115,11 +183,13 @@ export function restoreBlockState(state = {}) {
 }
 
 export function snapshotBlockState() {
+  const chestSnapshot = {};
+  for (const k in chests) chestSnapshot[k] = { ...chests[k] };
   return {
-    chests,
+    chests: chestSnapshot,
     openDoors: Array.from(openDoors),
     torches: Object.keys(torchLights),
-    edits: blockEdits,
+    edits: { ...blockEdits },
   };
 }
 
@@ -131,7 +201,7 @@ export function applyBlockEdit(x, y, z, id, { rebuild = true } = {}) {
   if (prev === 15 && id !== 15) openDoors.delete(keyOf(x, y, z));
   if (prev === 17 && id !== 17) delete chests[keyOf(x, y, z)];
   blockEdits[keyOf(x, y, z)] = id;
-  if (rebuild) rebuildTerrain();
+  if (rebuild) rebuildAroundBlock(x, z);
 }
 
 export function applyBlockEdits(edits = {}) {

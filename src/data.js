@@ -195,14 +195,18 @@ const FACES = [
   { dir: [ 0, 0, 1], colorKey: 'side',   corners: [[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
   { dir: [ 0, 0,-1], colorKey: 'side',   corners: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]] },
 ];
-export function buildMesh(THREE) {
+export function buildMesh(THREE, bounds = {}) {
+  const x0 = Math.max(0, bounds.x0 ?? 0);
+  const x1 = Math.min(WORLD_W, bounds.x1 ?? WORLD_W);
+  const z0 = Math.max(0, bounds.z0 ?? 0);
+  const z1 = Math.min(WORLD_D, bounds.z1 ?? WORLD_D);
   const positions = [], normals = [], colors = [], uvs = [], indices = [];
   const col = new THREE.Color();
   const faceUV = [[0,0],[0,1],[1,1],[1,0]]; // 每个面 4 角的 UV
   let v = 0;
   for (let y = 0; y < WORLD_H; y++)
-    for (let z = 0; z < WORLD_D; z++)
-      for (let x = 0; x < WORLD_W; x++) {
+    for (let z = z0; z < z1; z++)
+      for (let x = x0; x < x1; x++) {
         const id = getBlock(x, y, z);
         if (id === AIR) continue;
         for (const f of FACES) {
