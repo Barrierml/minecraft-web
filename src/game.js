@@ -368,7 +368,7 @@ function isSolidAt(x, y, z) {
     document.addEventListener('pointerlockchange', () => {
       locked = document.pointerLockElement === canvas;
       // 合成/箱子面板打开或玩家死亡时不弹"点击开始"遮罩
-      if (!locked && !craftOpen && !openChestKey && !player.dead) overlay.classList.remove('hidden');
+      if (!locked && !craftOpen && !openChestKey && !bagOpen && !player.dead) overlay.classList.remove('hidden');
       else overlay.classList.add('hidden');
     });
 
@@ -971,6 +971,62 @@ function isSolidAt(x, y, z) {
     // 渲染合成面板：列出所有配方，可合成的高亮、缺料的置灰
     const craftEl = document.getElementById('craft');
     const craftListEl = document.getElementById('craftList');
+
+    // ===== 背包面板 =====
+    const bagEl = document.getElementById('bag');
+    const bagGridEl = document.getElementById('bagGrid');
+    let bagOpen = false;
+    // 渲染背包：列出所有持有物品（含非放置类如工具/肉/矿产），食物可点击食用
+    function renderBag() {
+      bagGridEl.innerHTML = '';
+      const ids = Object.keys(inventory).filter(id => inventory[id] > 0);
+      if (ids.length === 0) {
+        const tip = document.createElement('div');
+        tip.className = 'empty-tip';
+        tip.textContent = '背包空空如也 —— 去挖点东西吧';
+        bagGridEl.appendChild(tip);
+        return;
+      }
+      for (const id of ids) {
+        const slot = document.createElement('div');
+        slot.className = 'bslot';
+        const sw = document.createElement('div');
+        sw.className = 'sw';
+        sw.style.background = '#' + itemColor(id).toString(16).padStart(6, '0');
+        const nm = document.createElement('div');
+        nm.className = 'nm';
+        const food = ITEMS[id]?.food;
+        nm.textContent = itemName(id) + (food ? ' 🍽' : '');
+        const cnt = document.createElement('span');
+        cnt.className = 'cnt';
+        cnt.textContent = inventory[id];
+        slot.appendChild(sw); slot.appendChild(nm); slot.appendChild(cnt);
+        // 点击：是食物则吃掉回饥饿
+        if (food) {
+          slot.title = '点击食用，回 ' + food + ' 点饥饿';
+          slot.addEventListener('click', () => {
+            if (inventory[id] > 0 && player.hunger < MAX_HUNGER) {
+              inventory[id]--;
+              player.hunger = Math.min(MAX_HUNGER, player.hunger + food);
+              renderHunger(); renderBag(); renderHotbar();
+            }
+          });
+        }
+        bagGridEl.appendChild(slot);
+      }
+    }
+    function toggleBag() {
+      bagOpen = !bagOpen;
+      if (bagOpen) {
+        renderBag();
+        bagEl.classList.remove('hidden');
+        document.exitPointerLock();
+      } else {
+        bagEl.classList.add('hidden');
+        canvas.requestPointerLock();
+      }
+    }
+
     function renderCraft() {
       craftListEl.innerHTML = '';
       for (const r of RECIPES) {
@@ -1003,6 +1059,12 @@ function isSolidAt(x, y, z) {
       }
     }
     document.addEventListener('keydown', e => {
+      // Tab 打开/关闭背包（阻止默认的焦点切换）
+      if (e.code === 'Tab') {
+        e.preventDefault();
+        if (!player.dead) toggleBag();
+        return;
+      }
       if (e.code === 'KeyE' && !player.dead) {
         if (openChestKey) closeChest();   // 箱子开着时 E 先关箱子
         else toggleCraft();

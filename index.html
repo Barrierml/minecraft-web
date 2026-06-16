@@ -153,6 +153,25 @@
   }
   #chest .cslot .sw { width: 24px; height: 24px; border-radius: 3px; border: 1px solid #000; }
   #chest .cslot .cnt { position: absolute; bottom: 0; right: 2px; font-size: 11px; font-weight: bold; text-shadow: 1px 1px 0 #000; }
+  /* 背包面板 */
+  #bag {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    z-index: 22; background: rgba(20,20,30,0.94); border: 2px solid #555;
+    border-radius: 8px; padding: 16px; color: #fff; width: 440px;
+  }
+  #bag h2 { font-size: 18px; margin-bottom: 4px; }
+  #bag .hint { font-size: 11px; opacity: 0.6; margin-bottom: 12px; }
+  #bagGrid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
+  #bag .bslot {
+    aspect-ratio: 1; border: 1px solid #555; border-radius: 4px; position: relative;
+    display: flex; align-items: center; justify-content: center; flex-direction: column;
+    cursor: pointer; background: rgba(255,255,255,0.04);
+  }
+  #bag .bslot:hover { border-color: #fff; background: rgba(255,255,255,0.12); }
+  #bag .bslot .sw { width: 28px; height: 28px; border-radius: 3px; border: 1px solid #000; }
+  #bag .bslot .nm { font-size: 9px; margin-top: 2px; opacity: 0.8; }
+  #bag .bslot .cnt { position: absolute; bottom: 2px; right: 3px; font-size: 12px; font-weight: bold; text-shadow: 1px 1px 0 #000,-1px -1px 0 #000; }
+  #bag .empty-tip { opacity: 0.5; font-size: 13px; padding: 20px; text-align: center; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -177,6 +196,11 @@
     <div class="hint">E 打开/关闭 · 灰色配方需靠近工作台 · 点击合成</div>
     <div id="craftList"></div>
   </div>
+  <div id="bag" class="hidden">
+    <h2>🎒 背包</h2>
+    <div class="hint">Tab 打开/关闭 · 点击食物可食用 · 显示全部持有物品</div>
+    <div id="bagGrid"></div>
+  </div>
   <div id="death" class="hidden">
     <h1>💀 你死了</h1>
     <div class="respawn">点击复活</div>
@@ -186,7 +210,7 @@
     <p>
       WASD 移动 · 鼠标 视角 · 空格 跳跃 · Shift 下蹲<br>
       左键 破坏/攻击 · 右键 放置/开门开箱<br>
-      数字键/滚轮 切换方块 · E 合成 · Q 吃东西 · K 存档 · ESC 释放鼠标
+      数字键/滚轮 切换方块 · Tab 背包 · E 合成 · Q 吃东西 · K 存档 · ESC 释放鼠标
     </p>
     <div class="start">点击开始</div>
     <div class="seedrow">
