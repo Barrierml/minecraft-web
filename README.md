@@ -46,11 +46,25 @@ npx serve .
 ## 项目结构
 
 ```
-index.html      游戏外壳：DOM 元素、CSS、importmap、引入 game.js
+index.html      当前入口：DOM 元素、CSS、importmap、引入 src/game.js
+legacy/
+  minecraft.html  历史单文件版本，不再同步维护
 src/
   data.js       纯数据层：常量、方块/物品定义、噪声、世界数据与地形、网格构建
-  game.js       游戏逻辑：场景、玩家、怪物、掉落物、合成、UI、主循环
+  game.js       当前装配入口：场景、UI、输入、联机桥接、主循环
+  player.js     本地玩家状态、移动碰撞、饥饿/回血/受伤/经验
+  combat.js     ECS 生物射线命中与稳定网络 id 查找
+  world.js      方块世界运行时状态：功能方块、火把、地形重建、block edits
+  inventory.js  库存与合成规则
+  audio.js      Web Audio 合成音效
+  daycycle.js   昼夜循环与天空/光照
+  clouds.js     云层
+  hand.js       第一人称手臂
+  remotePlayers.js  联机远程玩家渲染代理
+  save.js       新 localStorage 存档 schema
+  net.js        PeerJS/WebRTC 传输层
+  fx.js         星空和粒子系统
+  ecs/          bitECS 实体运行时：drops、mobs、animals、快照与系统
 ```
 
-`data.js` 无外部依赖（buildMesh 接收 THREE 作为参数）；`game.js` import data.js 与 three。
-后续会继续把 game.js 细分为 scene/player/mobs/crafting/ui 等模块。
+`data.js` 无外部依赖（buildMesh 接收 THREE 作为参数）。ECS 目前使用 `bitecs@0.4.0` core 入口，动物、怪物和掉落物都已从 `game.js` 的对象数组迁出。

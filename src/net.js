@@ -11,6 +11,7 @@ export const MSG = {
   INPUT: 'input',   // client→host 移动与朝向
   BLOCK: 'block',   // 双向 方块破坏/放置
   HIT:   'hit',     // client→host 攻击怪物/动物
+  PICKUP: 'pickup', // client→host 拾取掉落物
   CHAT:  'chat',    // 双向 聊天
   BYE:   'bye',     // 离开
 };
