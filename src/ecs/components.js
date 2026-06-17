@@ -28,6 +28,7 @@ export const Health = {
 export const Mob = {
   type: [],
   attackCd: [],
+  soundCd: [],
   fuse: [],
 };
 

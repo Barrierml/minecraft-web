@@ -30,19 +30,27 @@ export function makeParticleSystem(THREE, scene) {
   const geo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
 
   // 在某点喷一组粒子。color 十六进制，count 个，speed 初速，life 寿命秒
-  function burst(x, y, z, color, count, speed, life) {
-    const mat = new THREE.MeshBasicMaterial({ color });
+  function burst(x, y, z, color, count, speed, life, opts = {}) {
+    const mat = new THREE.MeshBasicMaterial({
+      color,
+      transparent: opts.opacity !== undefined,
+      opacity: opts.opacity ?? 1,
+    });
     for (let i = 0; i < count; i++) {
       const mesh = new THREE.Mesh(geo, mat);
       mesh.position.set(x, y, z);
+      const size = opts.size ?? 1;
+      mesh.scale.set(size, size, size);
       scene.add(mesh);
       particles.push({
         mesh,
+        size,
         vel: new THREE.Vector3(
           (Math.random() - 0.5) * speed,
           Math.random() * speed,
           (Math.random() - 0.5) * speed
         ),
+        gravityScale: opts.gravityScale ?? 1,
         age: 0, life: life * (0.6 + Math.random() * 0.8),
       });
     }
@@ -53,11 +61,11 @@ export function makeParticleSystem(THREE, scene) {
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.age += dt;
-      p.vel.y -= gravity * dt;
+      p.vel.y -= gravity * (p.gravityScale ?? 1) * dt;
       p.mesh.position.x += p.vel.x * dt;
       p.mesh.position.y += p.vel.y * dt;
       p.mesh.position.z += p.vel.z * dt;
-      const s = Math.max(0.01, 1 - p.age / p.life);
+      const s = (p.size ?? 1) * Math.max(0.01, 1 - p.age / p.life);
       p.mesh.scale.set(s, s, s);
       if (p.age >= p.life) { scene.remove(p.mesh); particles.splice(i, 1); }
     }

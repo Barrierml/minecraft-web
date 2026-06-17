@@ -4,7 +4,7 @@
 import { Animal, Body, Health, NetIdentity, Position, Velocity, getMesh } from '../components.js';
 import { getAnimalTypeKey, removeEcsEntity, reserveNetId, spawnAnimal } from '../factories.js';
 import { queries } from '../world.js';
-import { updateCreaturePhysics } from './physics.js';
+import { separateEntityFromPlayer, updateCreaturePhysics } from './physics.js';
 
 export function spawnAnimalNear(world, ctx) {
   const count = queries.animals(world).length;
@@ -75,6 +75,7 @@ export function updateAnimalsSystem(world, dt, ctx) {
       killAnimal(eid, ctx);
       continue;
     }
+    separateEntityFromPlayer(eid, ctx);
 
   }
 }

@@ -35,9 +35,15 @@ export class Net {
     this.handlers = {};        // type → fn(payload, fromId)
     this.roomId = null;        // 房间号(host 持有/ client 加入用)
     this.selfId = null;        // 本端 peer id
+    this.displayName = 'Player';
     this.onPeerJoin = null;    // (peerId)=>{}
     this.onPeerLeave = null;   // (peerId)=>{}
     this.onStatus = null;      // (text)=>{} 状态文案回调
+  }
+
+  setDisplayName(name) {
+    const clean = String(name || '').trim().slice(0, 16);
+    this.displayName = clean || 'Player';
   }
 
   on(type, fn) { this.handlers[type] = fn; }
@@ -66,8 +72,8 @@ export class Net {
   _acceptConn(conn) {
     conn.on('open', () => {
       this.conns.set(conn.peer, conn);
-      this._status('玩家加入（' + this.conns.size + ' 在线）');
-      if (this.onPeerJoin) this.onPeerJoin(conn.peer);
+        this._status('玩家加入（' + this.conns.size + ' 在线）');
+        if (this.onPeerJoin) this.onPeerJoin(conn.peer);
     });
     conn.on('data', (msg) => this._emit(msg.t, msg.d, conn.peer));
     conn.on('close', () => this._dropConn(conn.peer));
@@ -92,7 +98,7 @@ export class Net {
       conn.on('open', () => {
         this.conns.set('host', conn);
         this._status('已连接房主');
-        this.send(MSG.HELLO, { name: 'player' });
+        this.send(MSG.HELLO, { name: this.displayName });
         if (onReady) onReady();
       });
       conn.on('data', (msg) => this._emit(msg.t, msg.d, 'host'));

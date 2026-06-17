@@ -15,6 +15,7 @@ let threeRef = null;
 const terrainChunks = new Map();
 let terrainMat = null;
 let blockTexture = null;
+let fluidCursor = 0;
 
 export function keyOf(x, y, z) {
   return x + ',' + y + ',' + z;
@@ -23,32 +24,69 @@ export function keyOf(x, y, z) {
 export function initWorldRuntime(THREE, scene) {
   threeRef = THREE;
   sceneRef = scene;
-  blockTexture = makeNoiseTexture(THREE);
-  terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true, map: blockTexture });
+  blockTexture = makeTerrainAtlas(THREE);
+  terrainMat = new THREE.MeshLambertMaterial({
+    vertexColors: true,
+    map: blockTexture,
+    alphaTest: 0.35,
+  });
 }
 
-function makeNoiseTexture(THREE) {
-  const cv = document.createElement('canvas');
-  cv.width = cv.height = 16;
-  const ctx = cv.getContext('2d');
-  const img = ctx.createImageData(16, 16);
-  for (let i = 0; i < 16 * 16; i++) {
-    const v = 200 + Math.floor(Math.random() * 56);
-    img.data[i * 4] = v;
-    img.data[i * 4 + 1] = v;
-    img.data[i * 4 + 2] = v;
-    img.data[i * 4 + 3] = 255;
+function fillFallbackTile(ctx, x, y, size, hue) {
+  ctx.fillStyle = `hsl(${hue}, 28%, 58%)`;
+  ctx.fillRect(x, y, size, size);
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  for (let yy = 0; yy < size; yy += 16) {
+    for (let xx = 0; xx < size; xx += 16) {
+      if ((xx + yy) % 32 === 0) ctx.fillRect(x + xx, y + yy, 16, 16);
+    }
   }
-  ctx.putImageData(img, 0, 0);
+}
+
+function makeTerrainAtlas(THREE) {
+  const tileSize = 128;
+  const atlasSize = D.TERRAIN_ATLAS_SIZE * tileSize;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = atlasSize;
+  const ctx = cv.getContext('2d');
+
+  D.TERRAIN_TEXTURES.forEach((name, i) => {
+    const x = (i % D.TERRAIN_ATLAS_SIZE) * tileSize;
+    const y = Math.floor(i / D.TERRAIN_ATLAS_SIZE) * tileSize;
+    fillFallbackTile(ctx, x, y, tileSize, (i * 47) % 360);
+  });
+
   const tex = new THREE.CanvasTexture(cv);
+  // UVs are generated in canvas row order (top row first). Three's default
+  // flipY=true would invert the atlas and make blocks sample the wrong tile.
+  tex.flipY = false;
   tex.magFilter = THREE.NearestFilter;
   tex.minFilter = THREE.NearestFilter;
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.generateMipmaps = false;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+  tex.userData.animateOffset = false;
+
+  D.TERRAIN_TEXTURES.forEach((name, i) => {
+    const img = new Image();
+    img.onload = () => {
+      const x = (i % D.TERRAIN_ATLAS_SIZE) * tileSize;
+      const y = Math.floor(i / D.TERRAIN_ATLAS_SIZE) * tileSize;
+      ctx.clearRect(x, y, tileSize, tileSize);
+      ctx.drawImage(img, x, y, tileSize, tileSize);
+      tex.needsUpdate = true;
+    };
+    img.onerror = () => console.warn('Texture failed to load:', name);
+    img.src = new URL(`../assets/textures/kenney/${name}`, import.meta.url).href;
+  });
+
   return tex;
 }
 
 export function updateBlockTexture(dt) {
-  if (blockTexture) blockTexture.offset.x = (blockTexture.offset.x + dt * 0.02) % 1;
+  if (blockTexture?.userData.animateOffset) {
+    blockTexture.offset.x = (blockTexture.offset.x + dt * 0.02) % 1;
+  }
 }
 
 function chunkKey(cx, cz) {
@@ -193,6 +231,81 @@ export function snapshotBlockState() {
   };
 }
 
+function canSandFallInto(id) {
+  return id === D.AIR || id === 7;
+}
+
+function recordRuntimeBlock(x, y, z, id) {
+  D.setBlock(x, y, z, id);
+  blockEdits[keyOf(x, y, z)] = id;
+}
+
+function settleSandColumn(x, z) {
+  if (x < 0 || x >= D.WORLD_W || z < 0 || z >= D.WORLD_D) return [];
+  const changed = [];
+  for (let y = 1; y < D.WORLD_H; y++) {
+    if (D.getBlock(x, y, z) !== 6) continue;
+    let ny = y;
+    while (ny > 0 && canSandFallInto(D.getBlock(x, ny - 1, z))) ny--;
+    if (ny === y) continue;
+    recordRuntimeBlock(x, y, z, D.AIR);
+    recordRuntimeBlock(x, ny, z, 6);
+    changed.push([x, z]);
+  }
+  return changed;
+}
+
+function canWaterFlowInto(id) {
+  return id === D.AIR;
+}
+
+function waterSupported(x, y, z) {
+  const below = D.getBlock(x, y - 1, z);
+  return y <= 0 || D.isSolid(below) || below === 7;
+}
+
+function trySetWater(x, y, z, dirty, out) {
+  if (!D.inBounds(x, y, z) || !canWaterFlowInto(D.getBlock(x, y, z))) return false;
+  recordRuntimeBlock(x, y, z, 7);
+  dirty.add(`${x},${z}`);
+  out.push({ x, y, z, id: 7 });
+  return true;
+}
+
+export function updateFluidPhysics({ scan = 1400, maxChanges = 36 } = {}) {
+  const dirty = new Set();
+  const out = [];
+  const total = D.world.length;
+  for (let checked = 0; checked < scan && out.length < maxChanges; checked++) {
+    const i = fluidCursor;
+    fluidCursor = (fluidCursor + 1) % total;
+    if (D.world[i] !== 7) continue;
+
+    const y = Math.floor(i / (D.WORLD_W * D.WORLD_D));
+    const rem = i - y * D.WORLD_W * D.WORLD_D;
+    const z = Math.floor(rem / D.WORLD_W);
+    const x = rem - z * D.WORLD_W;
+
+    if (y > 0 && trySetWater(x, y - 1, z, dirty, out)) continue;
+    if (!waterSupported(x, y, z)) continue;
+
+    const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+    const start = (x * 13 + z * 7 + y) & 3;
+    for (let d = 0; d < 4 && out.length < maxChanges; d++) {
+      const [dx, dz] = dirs[(start + d) % dirs.length];
+      const nx = x + dx, nz = z + dz;
+      if (!D.inBounds(nx, y, nz)) continue;
+      if (y > 0 && !waterSupported(nx, y, nz)) continue;
+      trySetWater(nx, y, nz, dirty, out);
+    }
+  }
+  for (const k of dirty) {
+    const [x, z] = k.split(',').map(Number);
+    rebuildAroundBlock(x, z);
+  }
+  return out;
+}
+
 export function applyBlockEdit(x, y, z, id, { rebuild = true } = {}) {
   const prev = D.getBlock(x, y, z);
   D.setBlock(x, y, z, id);
@@ -201,7 +314,14 @@ export function applyBlockEdit(x, y, z, id, { rebuild = true } = {}) {
   if (prev === 15 && id !== 15) openDoors.delete(keyOf(x, y, z));
   if (prev === 17 && id !== 17) delete chests[keyOf(x, y, z)];
   blockEdits[keyOf(x, y, z)] = id;
-  if (rebuild) rebuildAroundBlock(x, z);
+  const dirtyColumns = new Set([`${x},${z}`]);
+  for (const [sx, sz] of settleSandColumn(x, z)) dirtyColumns.add(`${sx},${sz}`);
+  if (rebuild) {
+    for (const k of dirtyColumns) {
+      const [rx, rz] = k.split(',').map(Number);
+      rebuildAroundBlock(rx, rz);
+    }
+  }
 }
 
 export function applyBlockEdits(edits = {}) {

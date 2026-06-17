@@ -45,6 +45,7 @@ export function createNetSession(ctx) {
     updateNetbar,
     getSeed,
     setSeed,
+    getPlayerName,
     getGameTime,
     setGameTime,
     attackDamage,
@@ -52,6 +53,7 @@ export function createNetSession(ctx) {
   } = ctx;
   let lastNetSync = 0;
   let ready = false;
+  const playerNames = new Map();
 
   function markReady(value = true) {
     ready = value;
@@ -99,15 +101,18 @@ export function createNetSession(ctx) {
   function setupHostHandlers() {
     net.onPeerJoin = pid => {
       net.sendTo(pid, MSG.WORLD, worldPayload());
-      remotePlayers.ensure(pid);
+      remotePlayers.ensure(pid, playerNames.get(pid));
       updateNetbar();
     };
     net.on(MSG.HELLO, (data, from) => {
-      remotePlayers.ensure(from);
+      const name = sanitizeName(data?.name, from);
+      playerNames.set(from, name);
+      remotePlayers.ensure(from, name);
       updateNetbar();
     });
     net.on(MSG.INPUT, (data, from) => {
-      const rp = remotePlayers.ensure(from);
+      if (data.name) playerNames.set(from, sanitizeName(data.name, from));
+      const rp = remotePlayers.ensure(from, playerNames.get(from));
       rp.target.set(data.x, data.y, data.z);
       rp.yaw = data.yaw;
     });
@@ -129,12 +134,13 @@ export function createNetSession(ctx) {
       net.broadcast(MSG.CHEST, data, from);
     });
     net.on(MSG.HIT, data => {
+      const damage = Math.max(1, Math.min(20, Number(data.damage) || attackDamage));
       if (data.kind === 'mob') {
         const eid = findByNetId(ecsWorld, 'mob', data.id);
-        if (eid >= 0) damageMob(eid, attackDamage, { onKill: e => killMob(e, mobCtx()) });
+        if (eid >= 0) damageMob(eid, damage, { onKill: e => killMob(e, mobCtx()) });
       } else if (data.kind === 'animal') {
         const eid = findByNetId(ecsWorld, 'animal', data.id);
-        if (eid >= 0) damageAnimal(eid, attackDamage, { player, onKill: e => killAnimal(e, animalCtx()) });
+        if (eid >= 0) damageAnimal(eid, damage, { player, onKill: e => killAnimal(e, animalCtx()) });
       }
     });
     net.on(MSG.PICKUP, data => {
@@ -161,7 +167,7 @@ export function createNetSession(ctx) {
     for (const p of state.players) {
       if (p.id === net.selfId) continue;
       seen.add(p.id);
-      const rp = remotePlayers.ensure(p.id);
+      const rp = remotePlayers.ensure(p.id, p.name);
       rp.target.set(p.x, p.y, p.z);
       rp.yaw = p.yaw;
     }
@@ -173,9 +179,9 @@ export function createNetSession(ctx) {
   }
 
   function broadcastState() {
-    const players = [{ id: 'host', x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw }];
+    const players = [{ id: 'host', name: getPlayerName(), x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw }];
     for (const [pid, rp] of remotePlayers.entries()) {
-      players.push({ id: pid, x: rp.target.x, y: rp.target.y, z: rp.target.z, yaw: rp.yaw });
+      players.push({ id: pid, name: rp.name || playerNames.get(pid), x: rp.target.x, y: rp.target.y, z: rp.target.z, yaw: rp.yaw });
     }
     net.broadcast(MSG.STATE, {
       players,
@@ -195,8 +201,15 @@ export function createNetSession(ctx) {
     if (net.isHost()) {
       broadcastState();
     } else if (net.isClient()) {
-      net.send(MSG.INPUT, { x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw });
+      net.send(MSG.INPUT, { name: getPlayerName(), x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw });
     }
+  }
+
+  function sanitizeName(name, fallback) {
+    const clean = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 16);
+    if (clean) return clean;
+    if (fallback === 'host') return '房主';
+    return '玩家 ' + String(fallback || '').replace(/^minimc-/, '').slice(-4).toUpperCase();
   }
 
   function sendDoor(x, y, z, open) {

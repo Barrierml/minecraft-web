@@ -66,8 +66,17 @@ export function getAnimalTypeKey(eid) {
 }
 
 function boxGeometry(key, w, h, d) {
-  if (!geometryCache.has(key)) geometryCache.set(key, new threeRef.BoxGeometry(w, h, d));
-  return geometryCache.get(key);
+  const fullKey = `${key}:${w},${h},${d}`;
+  if (!geometryCache.has(fullKey)) geometryCache.set(fullKey, new threeRef.BoxGeometry(w, h, d));
+  return geometryCache.get(fullKey);
+}
+
+function addBox(group, key, size, pos, color) {
+  const mat = new threeRef.MeshLambertMaterial({ color });
+  const mesh = new threeRef.Mesh(boxGeometry(key, size[0], size[1], size[2]), mat);
+  mesh.position.set(pos[0], pos[1], pos[2]);
+  group.add(mesh);
+  return { mesh, mat };
 }
 
 function addKinematicBody(eid, x, y, z, radius, height) {
@@ -107,17 +116,48 @@ export function spawnDrop(x, y, z, itemId, netId) {
 export function makeMobMesh(typeKey) {
   const t = mobTypesRef[typeKey];
   const g = new threeRef.Group();
-  const bodyMat = new threeRef.MeshLambertMaterial({ color: t.body });
-  const body = new threeRef.Mesh(boxGeometry('mobBody', 0.7, 1.1, 0.4), bodyMat);
-  body.position.y = 0.55;
-  const headMat = new threeRef.MeshLambertMaterial({ color: t.head });
-  const head = new threeRef.Mesh(
-    boxGeometry('mobHead', 0.5, 0.5, 0.5),
-    headMat
-  );
-  head.position.y = 1.35;
-  g.add(body);
-  g.add(head);
+  let bodyMat;
+
+  if (typeKey === 'creeper') {
+    bodyMat = addBox(g, 'creeperBody', [0.56, 1.08, 0.36], [0, 0.78, 0], t.body).mat;
+    addBox(g, 'creeperHead', [0.62, 0.62, 0.62], [0, 1.48, 0], t.head);
+    const feet = [
+      addBox(g, 'creeperFoot', [0.24, 0.28, 0.24], [-0.22, 0.14, -0.14], 0x1f6a2d).mesh,
+      addBox(g, 'creeperFoot', [0.24, 0.28, 0.24], [0.22, 0.14, -0.14], 0x1f6a2d).mesh,
+      addBox(g, 'creeperFoot', [0.24, 0.28, 0.24], [-0.22, 0.14, 0.14], 0x1f6a2d).mesh,
+      addBox(g, 'creeperFoot', [0.24, 0.28, 0.24], [0.22, 0.14, 0.14], 0x1f6a2d).mesh,
+    ];
+    g.userData.walkParts = feet;
+    addBox(g, 'facePixel', [0.12, 0.12, 0.025], [-0.14, 1.56, -0.325], 0x101010);
+    addBox(g, 'facePixel', [0.12, 0.12, 0.025], [0.14, 1.56, -0.325], 0x101010);
+    addBox(g, 'facePixel', [0.12, 0.22, 0.025], [0, 1.38, -0.325], 0x101010);
+  } else if (typeKey === 'skeleton') {
+    bodyMat = addBox(g, 'skeletonRib', [0.46, 0.82, 0.22], [0, 0.82, 0], t.body).mat;
+    addBox(g, 'skeletonHead', [0.48, 0.48, 0.48], [0, 1.44, 0], t.head);
+    g.userData.walkParts = [
+      addBox(g, 'boneLimb', [0.14, 0.9, 0.14], [-0.36, 0.78, 0], 0xe8e8df).mesh,
+      addBox(g, 'boneLimb', [0.14, 0.9, 0.14], [0.36, 0.78, 0], 0xe8e8df).mesh,
+      addBox(g, 'boneLimb', [0.16, 0.72, 0.16], [-0.14, 0.28, 0], 0xe8e8df).mesh,
+      addBox(g, 'boneLimb', [0.16, 0.72, 0.16], [0.14, 0.28, 0], 0xe8e8df).mesh,
+    ];
+    addBox(g, 'facePixel', [0.1, 0.1, 0.025], [-0.12, 1.5, -0.255], 0x101010);
+    addBox(g, 'facePixel', [0.1, 0.1, 0.025], [0.12, 1.5, -0.255], 0x101010);
+    addBox(g, 'facePixel', [0.18, 0.06, 0.025], [0, 1.34, -0.255], 0x101010);
+  } else {
+    bodyMat = addBox(g, 'zombieBody', [0.68, 1.08, 0.36], [0, 0.78, 0], t.body).mat;
+    addBox(g, 'zombieHead', [0.54, 0.54, 0.54], [0, 1.46, 0], t.head);
+    const leftArm = addBox(g, 'zombieArm', [0.18, 0.84, 0.18], [-0.45, 0.82, -0.08], 0x4f8a3e).mesh;
+    const rightArm = addBox(g, 'zombieArm', [0.18, 0.84, 0.18], [0.45, 0.82, -0.08], 0x4f8a3e).mesh;
+    leftArm.rotation.x = -0.42;
+    rightArm.rotation.x = -0.42;
+    const leftLeg = addBox(g, 'zombieLeg', [0.22, 0.7, 0.22], [-0.16, 0.27, 0], 0x2b4b8f).mesh;
+    const rightLeg = addBox(g, 'zombieLeg', [0.22, 0.7, 0.22], [0.16, 0.27, 0], 0x2b4b8f).mesh;
+    g.userData.walkParts = [leftArm, rightArm, leftLeg, rightLeg];
+    addBox(g, 'facePixel', [0.1, 0.08, 0.025], [-0.12, 1.51, -0.285], 0x121212);
+    addBox(g, 'facePixel', [0.1, 0.08, 0.025], [0.12, 1.51, -0.285], 0x121212);
+    addBox(g, 'facePixel', [0.2, 0.05, 0.025], [0, 1.36, -0.285], 0x2a1b1b);
+  }
+
   g.userData.bodyMat = bodyMat;
   g.userData.disposeMaterials = true;
   return g;
@@ -126,17 +166,17 @@ export function makeMobMesh(typeKey) {
 export function makeAnimalMesh(typeKey) {
   const t = animalTypesRef[typeKey];
   const g = new threeRef.Group();
-  const bodyMat = new threeRef.MeshLambertMaterial({ color: t.body });
-  const body = new threeRef.Mesh(boxGeometry('animalBody', 0.6, 0.7, 1.0), bodyMat);
-  body.position.y = 0.55;
-  const headMat = new threeRef.MeshLambertMaterial({ color: t.head });
-  const head = new threeRef.Mesh(
-    boxGeometry('animalHead', 0.45, 0.45, 0.45),
-    headMat
-  );
-  head.position.set(0, 0.75, 0.6);
-  g.add(body);
-  g.add(head);
+  const bodyMat = addBox(g, 'animalBody', [0.62, 0.62, 0.98], [0, 0.52, 0], t.body).mat;
+  addBox(g, 'animalHead', [0.42, 0.42, 0.42], [0, 0.76, 0.62], t.head);
+  const hoofColor = typeKey === 'sheep' ? 0xd8d8d8 : 0x2b2018;
+  g.userData.walkParts = [
+    addBox(g, 'animalLeg', [0.14, 0.42, 0.14], [-0.22, 0.18, -0.28], hoofColor).mesh,
+    addBox(g, 'animalLeg', [0.14, 0.42, 0.14], [0.22, 0.18, -0.28], hoofColor).mesh,
+    addBox(g, 'animalLeg', [0.14, 0.42, 0.14], [-0.22, 0.18, 0.28], hoofColor).mesh,
+    addBox(g, 'animalLeg', [0.14, 0.42, 0.14], [0.22, 0.18, 0.28], hoofColor).mesh,
+  ];
+  addBox(g, 'facePixel', [0.06, 0.06, 0.02], [-0.09, 0.82, 0.835], 0x111111);
+  addBox(g, 'facePixel', [0.06, 0.06, 0.02], [0.09, 0.82, 0.835], 0x111111);
   g.userData.bodyMat = bodyMat;
   g.userData.disposeMaterials = true;
   return g;
@@ -167,6 +207,7 @@ export function spawnMob({ type, x, y, z, radius, height, netId }) {
   Health.hitFlash[eid] = 0;
   Mob.type[eid] = typeIndex;
   Mob.attackCd[eid] = 0;
+  Mob.soundCd[eid] = 2 + Math.random() * 6;
   Mob.fuse[eid] = -1;
 
   const mesh = makeMobMesh(type);

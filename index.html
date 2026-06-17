@@ -23,21 +23,36 @@
   /* 命中怪物时准星变红放大 */
   #crosshair.hit { transform: translate(-50%, -50%) scale(1.5); }
   #crosshair.hit::before, #crosshair.hit::after { background: #ff3030; }
+  #mineProgress {
+    position: fixed; top: calc(50% + 22px); left: 50%; transform: translateX(-50%);
+    width: 72px; height: 6px; z-index: 10; pointer-events: none;
+    border: 1px solid rgba(0,0,0,0.7); background: rgba(0,0,0,0.42);
+    opacity: 0; transition: opacity 0.08s; box-shadow: 0 0 2px rgba(255,255,255,0.25);
+  }
+  #mineProgress.on { opacity: 1; }
+  #mineProgress > div {
+    height: 100%; width: 0%; background: linear-gradient(90deg, #d8f5ff, #7acbff);
+    box-shadow: 0 0 4px rgba(120,203,255,0.7);
+  }
 
   /* 热键栏 */
   #hotbar {
     position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
-    display: flex; gap: 4px; padding: 4px; background: rgba(0,0,0,0.45);
-    border-radius: 6px; z-index: 10; pointer-events: none;
+    display: flex; gap: 6px; padding: 6px; background: rgba(6,8,10,0.72);
+    border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; z-index: 10; pointer-events: none;
   }
   .slot {
-    width: 48px; height: 48px; border: 2px solid rgba(255,255,255,0.25);
+    width: 56px; height: 58px; border: 2px solid rgba(255,255,255,0.22);
     border-radius: 4px; display: flex; align-items: center; justify-content: center;
     flex-direction: column; color: #fff; font-size: 10px; text-shadow: 1px 1px 0 #000;
+    position: relative; overflow: hidden;
   }
   .slot.active { border-color: #fff; background: rgba(255,255,255,0.15); }
   .slot.empty { opacity: 0.35; }
-  .slot .sw { width: 26px; height: 26px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.4); position: relative; }
+  .slot .key { position: absolute; top: 2px; left: 4px; font-size: 10px; opacity: 0.75; }
+  .slot .sw { width: 30px; height: 30px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.4); position: relative; }
+  .slot > span:last-child { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 2px; }
+  .sw { image-rendering: pixelated; background-size: cover; background-position: center; }
   /* 持有数量角标 */
   .slot .count {
     position: absolute; bottom: 1px; right: 2px; font-size: 12px; font-weight: bold;
@@ -60,7 +75,7 @@
   #overlay .start { margin-top: 8px; padding: 10px 24px; border: 2px solid #fff; border-radius: 6px; font-size: 16px; }
   /* 血量条 */
   #health {
-    position: fixed; bottom: 72px; left: 50%; transform: translateX(-50%);
+    position: fixed; bottom: 106px; left: calc(50% - 284px);
     display: flex; gap: 2px; z-index: 10; pointer-events: none;
   }
   #health .heart {
@@ -69,7 +84,7 @@
   }
   /* 饥饿条（血条右侧对称位置）*/
   #hunger {
-    position: fixed; bottom: 72px; left: 50%; transform: translateX(120px);
+    position: fixed; bottom: 106px; left: calc(50% + 72px);
     display: flex; gap: 2px; z-index: 10; pointer-events: none;
   }
   #hunger .drum {
@@ -83,6 +98,15 @@
     opacity: 0; transition: opacity 0.1s;
   }
   #hurt.flash { opacity: 1; }
+  #waterOverlay {
+    position: fixed; inset: 0; z-index: 14; pointer-events: none;
+    background:
+      radial-gradient(circle at 50% 45%, rgba(170,230,255,0.08), rgba(18,92,135,0.34) 68%, rgba(4,34,62,0.48)),
+      linear-gradient(180deg, rgba(96,190,230,0.14), rgba(12,54,88,0.32));
+    opacity: 0; transition: opacity 0.25s;
+    mix-blend-mode: screen;
+  }
+  #waterOverlay.on { opacity: 1; }
   /* 死亡屏 */
   #death {
     position: fixed; inset: 0; z-index: 25; display: flex; align-items: center;
@@ -100,14 +124,38 @@
   #craft h2 { font-size: 18px; margin-bottom: 4px; }
   #craft .hint { font-size: 11px; opacity: 0.6; margin-bottom: 10px; }
   #craft .recipe {
-    display: flex; align-items: center; gap: 8px; padding: 6px; border-radius: 4px;
+    display: grid; grid-template-columns: auto auto 1fr; align-items: center; gap: 8px; padding: 7px; border-radius: 4px;
     margin-bottom: 4px; cursor: pointer; border: 1px solid transparent;
   }
   #craft .recipe.ok { background: rgba(80,160,80,0.18); border-color: rgba(120,200,120,0.4); }
   #craft .recipe.no { opacity: 0.4; cursor: not-allowed; }
   #craft .recipe .sw { width: 20px; height: 20px; border-radius: 3px; border: 1px solid #000; }
+  #craft .recipe .grid { display: grid; gap: 2px; grid-template-columns: repeat(3, 18px); }
+  #craft .recipe .cell {
+    width: 18px; height: 18px; border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(0,0,0,0.22); border-radius: 2px;
+  }
   #craft .recipe .txt { font-size: 12px; flex: 1; }
+  #craft .recipe .badge { float: right; font-size: 10px; color: #d8f2ff; border: 1px solid rgba(160,220,255,0.45); padding: 1px 4px; border-radius: 3px; }
   #craft .recipe .need { font-size: 10px; opacity: 0.7; }
+  /* 熔炉面板 */
+  #furnace {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    z-index: 22; background: rgba(18,18,24,0.95); border: 2px solid #5c5146;
+    border-radius: 8px; padding: 16px; color: #fff; width: 360px; max-height: 70vh; overflow-y: auto;
+  }
+  #furnace h2 { font-size: 18px; margin-bottom: 4px; }
+  #furnace .hint { font-size: 11px; opacity: 0.65; margin-bottom: 10px; }
+  #furnace .recipe {
+    display: grid; grid-template-columns: auto auto auto 1fr; align-items: center;
+    gap: 8px; padding: 8px; border-radius: 4px; margin-bottom: 5px; border: 1px solid transparent;
+  }
+  #furnace .recipe.ok { background: rgba(190,112,54,0.18); border-color: rgba(255,170,90,0.45); cursor: pointer; }
+  #furnace .recipe.no { opacity: 0.42; cursor: not-allowed; }
+  #furnace .sw { width: 24px; height: 24px; border-radius: 3px; border: 1px solid #000; }
+  #furnace .arrow { color: #ffcf8a; font-size: 15px; }
+  #furnace .txt { font-size: 12px; }
+  #furnace .need { margin-top: 2px; font-size: 10px; opacity: 0.72; }
   /* 伤害飘字 */
   .dmgtext {
     position: fixed; z-index: 18; pointer-events: none; font-weight: bold; font-size: 22px;
@@ -116,7 +164,7 @@
   .dmgtext.hurt { color: #ff5050; font-size: 26px; }
   /* 经验条 */
   #xpbar {
-    position: fixed; bottom: 66px; left: 50%; transform: translateX(-50%);
+    position: fixed; bottom: 92px; left: 50%; transform: translateX(-50%);
     width: 280px; height: 8px; background: rgba(0,0,0,0.5); border-radius: 4px; z-index: 10;
     pointer-events: none; overflow: visible;
   }
@@ -141,6 +189,14 @@
     color: #aef; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;
     border: 1px solid rgba(120,200,255,0.4); }
   #netbar.hidden { display: none; }
+  #weather {
+    position: fixed; top: 42px; right: 10px; z-index: 10; pointer-events: none;
+    color: #d7f2ff; background: rgba(5,8,12,0.54); border: 1px solid rgba(150,210,255,0.28);
+    padding: 5px 10px; border-radius: 6px; font-size: 12px; text-shadow: 1px 1px 0 #000;
+  }
+  #weather.storm { color: #fff0a8; border-color: rgba(255,225,120,0.5); }
+  #weather.snow { color: #fff; }
+  #weather.wet { background: rgba(6,16,24,0.66); }
   /* 箱子面板 */
   #chest {
     position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
@@ -183,14 +239,17 @@
 <body>
   <canvas id="c"></canvas>
   <div id="crosshair"></div>
+  <div id="mineProgress"><div></div></div>
   <div id="info"></div>
   <div id="netbar" class="hidden"></div>
+  <div id="weather">天气 晴</div>
   <div id="hotbar"></div>
   <div id="health"></div>
   <div id="hunger"></div>
   <div id="xpbar"><div id="xpfill"></div><span id="xptext"></span></div>
   <div id="hint"></div>
   <div id="hurt"></div>
+  <div id="waterOverlay"></div>
   <div id="chest" class="hidden">
     <h2>📦 箱子</h2>
     <div class="hint">点击箱子格取出 · 点击背包格存入 · E 关闭</div>
@@ -198,9 +257,14 @@
     <div class="chestrow"><b>背包</b><div id="chestInv"></div></div>
   </div>
   <div id="craft" class="hidden">
-    <h2>🔨 合成</h2>
-    <div class="hint">E 打开/关闭 · 灰色配方需靠近工作台 · 点击合成</div>
+    <h2 id="craftTitle">🔨 合成</h2>
+    <div class="hint" id="craftHint">随身 2×2 配方可用 · 靠近或右键工作台解锁 3×3</div>
     <div id="craftList"></div>
+  </div>
+  <div id="furnace" class="hidden">
+    <h2>🔥 熔炉</h2>
+    <div class="hint">右键炉子打开 · 消耗煤炭烧制特殊物品 · E 关闭</div>
+    <div id="furnaceList"></div>
   </div>
   <div id="bag" class="hidden">
     <h2>🎒 背包</h2>
@@ -226,6 +290,7 @@
     <p style="font-size:12px;opacity:0.6">有存档会自动继续；点「新世界」用种子重开（会覆盖存档）</p>
     <div class="seedrow" style="margin-top:14px">
       <div class="btn" id="hostBtn">🌐 创建房间</div>
+      <input id="nameInput" type="text" placeholder="玩家名" maxlength="16" style="width:110px">
       <input id="roomInput" type="text" placeholder="房间号" maxlength="6" style="width:110px;text-transform:uppercase">
       <div class="btn" id="joinBtn">加入</div>
     </div>

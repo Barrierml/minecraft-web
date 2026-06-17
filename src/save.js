@@ -28,6 +28,7 @@ export function saveGame(snapshot) {
       blockState: snapshot.blockState,
       player: snapshot.player,
       inventory: snapshot.inventory,
+      hotbar: snapshot.hotbar,
       time: snapshot.time,
       ecs: snapshot.ecs || { nextNetId: 1, mobs: [], animals: [], drops: [] },
       savedAt: Date.now(),

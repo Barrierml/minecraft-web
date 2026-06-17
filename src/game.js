@@ -12,20 +12,22 @@ import { initAudio, playSound } from './audio.js';
 import { createDayCycle } from './daycycle.js';
 import { createRemotePlayers } from './remotePlayers.js';
 import { createClouds } from './clouds.js';
+import { createWeather } from './weather.js';
 import { createHand } from './hand.js';
 import { createHud } from './hud.js';
 import { createKeyState, shouldHandleGameKey } from './input.js';
 import {
-  inventory, RECIPES,
+  inventory, RECIPES, FURNACE_RECIPES,
   addToInventory as addItemToInventory,
   removeFromInventory, giveStartingInventory, restoreInventory,
   canCraft as canCraftRecipe, craft as craftRecipe,
+  canSmelt as canSmeltRecipe, smelt as smeltRecipe,
 } from './inventory.js';
 import {
   initWorldRuntime, rebuildTerrain, updateBlockTexture,
   keyOf, isSolidAt, surfaceY,
   openDoors, chests,
-  clearBlockState, restoreBlockState, snapshotBlockState, applyBlockEdit, applyBlockEdits,
+  clearBlockState, restoreBlockState, snapshotBlockState, applyBlockEdit, applyBlockEdits, updateFluidPhysics,
 } from './world.js';
 import { ecsWorld } from './ecs/world.js';
 import { initFactories, setNextNetId, spawnDrop } from './ecs/factories.js';
@@ -48,13 +50,15 @@ import { findByNetId, netIdFor, raycastCreature } from './combat.js';
 const {
   WORLD_W, WORLD_H, WORLD_D,
   GRAVITY, JUMP_SPEED, MOVE_SPEED, SPRINT_MULT, PLAYER_HEIGHT, PLAYER_RADIUS, REACH,
-  PICKUP_RANGE, DROP_LIFETIME,
+  PICKUP_RANGE, DROP_LIFETIME, HOTBAR_SIZE,
+  SAFE_FALL_DISTANCE, FALL_DAMAGE_PER_BLOCK,
   MAX_HEALTH, REGEN_DELAY, REGEN_RATE, ATTACK_DAMAGE, ATTACK_RANGE, ATTACK_COOLDOWN,
   MOB_COUNT, MOB_SIGHT, MOB_RADIUS, MOB_HEIGHT, MOB_ATTACK_CD, MOB_TYPES, MOB_TYPE_KEYS,
   ANIMAL_COUNT, ANIMAL_TYPES, ANIMAL_TYPE_KEYS,
-  AIR, BLOCKS, ITEMS, PLACEABLE,
+  AIR, BLOCKS, ITEMS,
   XP_PER_MOB, XP_PER_ORE,
-  itemName, itemColor, blockColor, isSolid, isClimbable, dropOf,
+  itemName, itemColor, itemDamage, blockColor, isSolid, isClimbable, dropOf,
+  itemTexturePath, isPlaceableItem, miningDuration,
   world, inBounds, getBlock, generateWorld,
 } = D;
 // ===== 联机状态（net 层）=====
@@ -122,6 +126,8 @@ const net = new Net();
 
     // 命中标记：准星短暂变红放大（crosshair 在 DOM 顶部已定义）
     const crosshair = document.getElementById('crosshair');
+    const mineProgressEl = document.getElementById('mineProgress');
+    const mineProgressFillEl = mineProgressEl.querySelector('div');
     let hitMarkerT = 0;
     function triggerHitMarker() { hitMarkerT = 0.12; }
     function updateHitMarker(dt) {
@@ -173,6 +179,12 @@ const net = new Net();
       maxHealth: MAX_HEALTH,
       maxHunger: MAX_HUNGER,
     });
+    const weather = createWeather(THREE, {
+      scene,
+      player,
+      playSound,
+      labelEl: document.getElementById('weather'),
+    });
     const dayCycle = createDayCycle(THREE, { scene, sun, ambient, stars, player });
     const HUNGER_DECAY = 0.06;   // 每秒自然下降
     const STARVE_DAMAGE = 1;     // 饥饿归零时每 2 秒掉血
@@ -190,8 +202,13 @@ const net = new Net();
     });
     document.addEventListener('pointerlockchange', () => {
       locked = document.pointerLockElement === canvas;
+      if (!locked) {
+        leftMouseDown = false;
+        suppressMiningUntilMouseup = false;
+        cancelMining();
+      }
       // 合成/箱子面板打开或玩家死亡时不弹"点击开始"遮罩
-      if (!locked && !craftOpen && !openChestKey && !bagOpen && !player.dead) overlay.classList.remove('hidden');
+      if (!locked && !craftOpen && !furnaceOpen && !openChestKey && !bagOpen && !player.dead) overlay.classList.remove('hidden');
       else overlay.classList.add('hidden');
     });
 
@@ -212,6 +229,14 @@ const net = new Net();
       deathEl.classList.remove('hidden');
       document.exitPointerLock();
     }
+    function placePlayerAtSpawn() {
+      const x = Math.floor(WORLD_W / 2);
+      const z = Math.floor(WORLD_D / 2);
+      player.pos.set(x + 0.5, surfaceY(x, z) + 0.05 + PLAYER_HEIGHT, z + 0.5);
+      player.vel.set(0, 0, 0);
+      player.onGround = false;
+      player.fallStartY = player.pos.y;
+    }
 
     // 获得经验：累加、升级、刷新经验条
     function gainXP(amount) {
@@ -231,6 +256,9 @@ const net = new Net();
         worldD: WORLD_D,
         radius: MOB_RADIUS,
         height: MOB_HEIGHT,
+        playerRadius: PLAYER_RADIUS,
+        playerHeight: PLAYER_HEIGHT,
+        creaturePersonalSpace: 0.18,
         gravity: GRAVITY,
         jumpSpeed: JUMP_SPEED,
         surfaceY,
@@ -280,104 +308,251 @@ const net = new Net();
 
     // ===== 方块选取（DDA 射线）=====
     // 从眼睛沿视线方向步进，返回命中的方块坐标和命中面的法线（用于在邻格放置）。
-    function raycastBlock() {
+    function raycastBlock({ mode = 'interact' } = {}) {
       const origin = player.pos.clone();
       const dir = new THREE.Vector3(0, 0, -1)
         .applyEuler(new THREE.Euler(player.pitch, player.yaw, 0, 'YXZ')).normalize();
 
       let x = Math.floor(origin.x), y = Math.floor(origin.y), z = Math.floor(origin.z);
-      const stepX = Math.sign(dir.x), stepY = Math.sign(dir.y), stepZ = Math.sign(dir.z);
+      const stepX = dir.x > 0 ? 1 : dir.x < 0 ? -1 : 0;
+      const stepY = dir.y > 0 ? 1 : dir.y < 0 ? -1 : 0;
+      const stepZ = dir.z > 0 ? 1 : dir.z < 0 ? -1 : 0;
       // 到下一格边界的距离（避免除零用 Infinity）
       const tDeltaX = dir.x !== 0 ? Math.abs(1 / dir.x) : Infinity;
       const tDeltaY = dir.y !== 0 ? Math.abs(1 / dir.y) : Infinity;
       const tDeltaZ = dir.z !== 0 ? Math.abs(1 / dir.z) : Infinity;
-      const fract = (a, s) => s > 0 ? (1 - (a - Math.floor(a))) : (a - Math.floor(a));
-      let tMaxX = dir.x !== 0 ? fract(origin.x, stepX) * tDeltaX : Infinity;
-      let tMaxY = dir.y !== 0 ? fract(origin.y, stepY) * tDeltaY : Infinity;
-      let tMaxZ = dir.z !== 0 ? fract(origin.z, stepZ) * tDeltaZ : Infinity;
+      let tMaxX = dir.x > 0 ? (Math.floor(origin.x) + 1 - origin.x) / dir.x
+        : dir.x < 0 ? (origin.x - Math.floor(origin.x)) / -dir.x
+          : Infinity;
+      let tMaxY = dir.y > 0 ? (Math.floor(origin.y) + 1 - origin.y) / dir.y
+        : dir.y < 0 ? (origin.y - Math.floor(origin.y)) / -dir.y
+          : Infinity;
+      let tMaxZ = dir.z > 0 ? (Math.floor(origin.z) + 1 - origin.z) / dir.z
+        : dir.z < 0 ? (origin.z - Math.floor(origin.z)) / -dir.z
+          : Infinity;
 
       let nx = 0, ny = 0, nz = 0; // 上一步前进的法线方向
-      for (let t = 0; t < REACH * 2; t++) {
-        if (getBlock(x, y, z) !== AIR && inBounds(x, y, z)) {
-          return { hit: [x, y, z], normal: [nx, ny, nz] };
+      let distance = 0;
+      let enteredBlock = false;
+      while (distance <= REACH) {
+        const id = getBlock(x, y, z);
+        if (id !== AIR && inBounds(x, y, z)) {
+          // 挖掘时水只阻挡视线反馈，不作为可破坏目标；射线继续找水后的实心方块。
+          if (!(mode === 'break' && id === 7)) {
+            // 如果眼睛意外在方块内部，不把这个方块当作可挖目标。
+            if (!enteredBlock) return null;
+            if (mode === 'break' && !canBreakByRay(id)) return null;
+            return { hit: [x, y, z], normal: [nx, ny, nz], id, distance };
+          }
         }
         // 选最近的轴前进
         if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+          distance = tMaxX;
           x += stepX; tMaxX += tDeltaX; nx = -stepX; ny = 0; nz = 0;
         } else if (tMaxY < tMaxZ) {
+          distance = tMaxY;
           y += stepY; tMaxY += tDeltaY; nx = 0; ny = -stepY; nz = 0;
         } else {
+          distance = tMaxZ;
           z += stepZ; tMaxZ += tDeltaZ; nx = 0; ny = 0; nz = -stepZ;
         }
-        if (Math.min(tMaxX, tMaxY, tMaxZ) > REACH) break;
+        enteredBlock = true;
       }
       return null;
+    }
+    function canBreakByRay(id) {
+      return id !== AIR && id !== 7;
+    }
+    function isPlayerInWaterNow() {
+      const x = Math.floor(player.pos.x);
+      const z = Math.floor(player.pos.z);
+      const chest = Math.floor(player.pos.y - PLAYER_HEIGHT * 0.45);
+      const feet = Math.floor(player.pos.y - PLAYER_HEIGHT + 0.2);
+      return getBlock(x, chest, z) === 7 || getBlock(x, feet, z) === 7;
+    }
+    let underwaterBubbleT = 0;
+    function spawnWaterBubbles(count = 6, spread = 0.65) {
+      particles.burst(
+        player.pos.x + (Math.random() - 0.5) * spread,
+        player.pos.y - PLAYER_HEIGHT * 0.55,
+        player.pos.z + (Math.random() - 0.5) * spread,
+        0x9ee8ff,
+        count,
+        0.55,
+        0.75,
+        { opacity: 0.58, size: 0.45, gravityScale: -0.18 }
+      );
+    }
+    function updateWaterFeedback(dt) {
+      const inWater = !player.dead && isPlayerInWaterNow();
+      waterOverlayEl.classList.toggle('on', inWater);
+      if (!inWater) {
+        underwaterBubbleT = 0;
+        return;
+      }
+      underwaterBubbleT -= dt;
+      if (underwaterBubbleT <= 0) {
+        underwaterBubbleT = 0.22 + Math.random() * 0.12;
+        spawnWaterBubbles(3, 0.85);
+      }
+    }
+    const mining = {
+      active: false,
+      key: '',
+      id: AIR,
+      toolId: null,
+      elapsed: 0,
+      duration: 1,
+      swingT: 0,
+      chipT: 0,
+    };
+    let leftMouseDown = false;
+    let suppressMiningUntilMouseup = false;
+    function setMiningProgress(value, visible) {
+      mineProgressEl.classList.toggle('on', visible);
+      mineProgressFillEl.style.width = Math.round(Math.max(0, Math.min(1, value)) * 100) + '%';
+    }
+    function cancelMining() {
+      mining.active = false;
+      mining.key = '';
+      mining.elapsed = 0;
+      mining.swingT = 0;
+      mining.chipT = 0;
+      setMiningProgress(0, false);
+    }
+    function startMiningTarget(r, toolId) {
+      const [x, y, z] = r.hit;
+      mining.active = true;
+      mining.key = keyOf(x, y, z);
+      mining.id = r.id;
+      mining.toolId = toolId ?? null;
+      mining.elapsed = 0;
+      mining.duration = miningDuration(r.id, toolId);
+      mining.swingT = 0;
+      mining.chipT = 0;
+      setMiningProgress(0, true);
+    }
+    function breakMinedBlock(r) {
+      const [x, y, z] = r.hit;
+      const broken = getBlock(x, y, z);
+      if (!canBreakByRay(broken)) return;
+      applyBlockEdit(x, y, z, AIR);
+      if (net.isMultiplayer()) net.send(MSG.BLOCK, { x, y, z, id: AIR });
+      const drop = dropOf(broken);
+      if (drop !== null && !net.isClient()) spawnDrop(x, y, z, drop);
+      if (broken === 10 || broken === 11) gainXP(XP_PER_ORE); // 挖矿石得经验
+      playSound('break');
+      particles.burst(x + 0.5, y + 0.5, z + 0.5, blockColor(broken, 'top'), 8, 3, 0.5);
+      player.hunger = Math.max(0, player.hunger - 0.15);
+      renderHunger();
+    }
+    function updateMining(dt) {
+      if (!leftMouseDown || suppressMiningUntilMouseup || !locked || player.dead) {
+        if (mining.active) cancelMining();
+        return;
+      }
+      const r = raycastBlock({ mode: 'break' });
+      if (!r) {
+        if (mining.active) cancelMining();
+        return;
+      }
+      const [x, y, z] = r.hit;
+      const toolId = selectedItem();
+      const targetKey = keyOf(x, y, z);
+      if (!mining.active || mining.key !== targetKey || mining.id !== r.id || mining.toolId !== (toolId ?? null)) {
+        startMiningTarget(r, toolId);
+      }
+      if (!Number.isFinite(mining.duration)) {
+        cancelMining();
+        return;
+      }
+      const inWater = isPlayerInWaterNow();
+      mining.elapsed += dt * (inWater ? 0.38 : 1);
+      mining.swingT -= dt;
+      mining.chipT -= dt;
+      if (mining.swingT <= 0) {
+        mining.swingT = Math.max(0.12, Math.min(0.28, mining.duration * 0.32));
+        hand.startSwing();
+      }
+      if (mining.chipT <= 0) {
+        mining.chipT = Math.max(0.08, Math.min(0.18, mining.duration * 0.08));
+        particles.burst(x + 0.5, y + 0.5, z + 0.5, blockColor(r.id, 'top'), 2, 0.8, 0.25, { size: 0.45 });
+        if (inWater) spawnWaterBubbles(2, 0.7);
+      }
+      setMiningProgress(mining.elapsed / mining.duration, true);
+      if (mining.elapsed >= mining.duration) {
+        breakMinedBlock(r);
+        cancelMining();
+      }
     }
 
     // ===== 破坏 / 放置 =====
     document.addEventListener('mousedown', e => {
       if (!locked || player.dead) return;
       if (e.button === 0) {
+        leftMouseDown = true;
+        suppressMiningUntilMouseup = false;
         hand.startSwing(); // 左键总是挥手
+        if (isPlayerInWaterNow()) {
+          spawnWaterBubbles(6, 0.85);
+          playSound('splash');
+        }
         // 左键：先看是否瞄准怪物（不依赖方块命中，这样对着天空的怪物也能打），是则攻击
-        if (player.attackCd <= 0) {
-          const mobEid = raycastCreature(ecsWorld, THREE, player, { kind: 'mob', range: ATTACK_RANGE });
-          if (mobEid >= 0) {
+        const mobEid = raycastCreature(ecsWorld, THREE, player, { kind: 'mob', range: ATTACK_RANGE });
+        if (mobEid >= 0) {
+          suppressMiningUntilMouseup = true;
+          cancelMining();
+          if (player.attackCd <= 0) {
+            const damage = selectedAttackDamage();
             player.attackCd = ATTACK_COOLDOWN;
             triggerHitMarker();          // 准星命中标记
-            spawnDamageText(ATTACK_DAMAGE, false); // 伤害飘字
+            spawnDamageText(damage, false); // 伤害飘字
             playSound('hit');            // 打击音效
             if (net.isClient()) {
-              damageMob(mobEid, ATTACK_DAMAGE, { knockbackYaw: player.yaw });
-              net.send(MSG.HIT, { kind: 'mob', id: netIdFor(mobEid) }); // 客户端：交给房主结算
+              damageMob(mobEid, damage, { knockbackYaw: player.yaw });
+              net.send(MSG.HIT, { kind: 'mob', id: netIdFor(mobEid), damage }); // 客户端：交给房主结算
             } else {
-              damageMob(mobEid, ATTACK_DAMAGE, {
+              damageMob(mobEid, damage, {
                 knockbackYaw: player.yaw,
                 onKill: killMobWithRewards,
               });
             }
-            return; // 攻击了怪物就不破坏方块
           }
-          // 没瞄到怪物，再看动物
-          const animalEid = raycastCreature(ecsWorld, THREE, player, { kind: 'animal', range: ATTACK_RANGE });
-          if (animalEid >= 0) {
+          return; // 攻击了怪物就不破坏方块
+        }
+        // 没瞄到怪物，再看动物
+        const animalEid = raycastCreature(ecsWorld, THREE, player, { kind: 'animal', range: ATTACK_RANGE });
+        if (animalEid >= 0) {
+          suppressMiningUntilMouseup = true;
+          cancelMining();
+          if (player.attackCd <= 0) {
+            const damage = selectedAttackDamage();
             player.attackCd = ATTACK_COOLDOWN;
             triggerHitMarker();
-            spawnDamageText(ATTACK_DAMAGE, false);
+            spawnDamageText(damage, false);
             playSound('hit');
             if (net.isClient()) {
-              damageAnimal(animalEid, ATTACK_DAMAGE, { player });
-              net.send(MSG.HIT, { kind: 'animal', id: netIdFor(animalEid) });
+              damageAnimal(animalEid, damage, { player });
+              net.send(MSG.HIT, { kind: 'animal', id: netIdFor(animalEid), damage });
             } else {
-              damageAnimal(animalEid, ATTACK_DAMAGE, {
+              damageAnimal(animalEid, damage, {
                 player,
                 onKill: killAnimalWithSound,
               });
             }
-            return;
           }
+          return;
         }
-        // 没瞄到怪物/动物：破坏方块，按掉落表产出掉落物
-        const r = raycastBlock();
-        if (!r) return;
-        const [x, y, z] = r.hit;
-        const broken = getBlock(x, y, z);
-        applyBlockEdit(x, y, z, AIR);
-        if (net.isMultiplayer()) net.send(MSG.BLOCK, { x, y, z, id: AIR });
-        const drop = dropOf(broken);
-        if (drop !== null && !net.isClient()) spawnDrop(x, y, z, drop);
-        if (broken === 10 || broken === 11) gainXP(XP_PER_ORE); // 挖矿石得经验
-        playSound('break');
-        // 破坏碎屑粒子：用方块顶色喷一小撮
-        particles.burst(x + 0.5, y + 0.5, z + 0.5, blockColor(broken, 'top'), 8, 3, 0.5);
-        player.hunger = Math.max(0, player.hunger - 0.15); // 挖掘消耗饥饿
       } else if (e.button === 2) {
+        cancelMining();
         const r = raycastBlock();
         if (!r) return;
         const [x, y, z] = r.hit;
         const hitId = getBlock(x, y, z);
         // 右键功能方块：箱子→开存储，门→开关
         if (hitId === 17) { openChest(x, y, z); return; }
+        if (hitId === 12) { openCraft(true); return; }
+        if (hitId === 20) { openFurnace(); return; }
         if (hitId === 15) {
           const k = keyOf(x, y, z);
           netSession.sendDoor(x, y, z, !openDoors.has(k));
@@ -395,7 +570,8 @@ const net = new Net();
         const overlapY = py < player.pos.y + 0.1 && py + 1 > feet - 0.1;
         if (overlapXZ && overlapY) return;
         // 生存模式：必须有库存才能放置，放置后扣减
-        const placeId = PLACEABLE[selected];
+        const placeId = selectedItem();
+        if (!isPlaceableItem(placeId)) return;
         if ((inventory[placeId] || 0) <= 0) return;
         removeFromInventory(placeId, 1);
         renderHotbar();
@@ -404,12 +580,24 @@ const net = new Net();
         playSound('place');
       }
     });
+    document.addEventListener('mouseup', e => {
+      if (e.button !== 0) return;
+      leftMouseDown = false;
+      suppressMiningUntilMouseup = false;
+      cancelMining();
+    });
+    window.addEventListener('blur', () => {
+      leftMouseDown = false;
+      suppressMiningUntilMouseup = false;
+      cancelMining();
+    });
     // 屏蔽右键菜单，否则放置会弹出浏览器菜单
     document.addEventListener('contextmenu', e => e.preventDefault());
 
     // ===== UI =====
     const overlay = document.getElementById('overlay');
     const hurtEl = document.getElementById('hurt');
+    const waterOverlayEl = document.getElementById('waterOverlay');
     const deathEl = document.getElementById('death');
     const chestEl = document.getElementById('chest');
     const chestSlotsEl = document.getElementById('chestSlots');
@@ -422,12 +610,80 @@ const net = new Net();
       clearTimeout(hintTimer);
       hintTimer = setTimeout(() => hintEl.classList.remove('show'), 1500);
     }
-    let selected = 0; // PLACEABLE 中的索引
+    function paintItemIcon(el, id) {
+      el.style.backgroundColor = '#' + itemColor(id).toString(16).padStart(6, '0');
+      const texture = itemTexturePath(id);
+      if (!texture) return;
+      el.style.backgroundImage = `url("${texture}")`;
+      el.style.backgroundSize = 'cover';
+      el.style.backgroundPosition = 'center';
+    }
+    const hotbar = Array(HOTBAR_SIZE).fill(null);
+    let selected = 0; // hotbar 中的索引
+    function canHotbar(id) {
+      return !!(BLOCKS[id] || ITEMS[id]);
+    }
+    function normalizeHotbar() {
+      const seen = new Set();
+      for (let i = 0; i < hotbar.length; i++) {
+        const id = Number(hotbar[i]);
+        if (!canHotbar(id) || (inventory[id] || 0) <= 0 || seen.has(id)) hotbar[i] = null;
+        else {
+          hotbar[i] = id;
+          seen.add(id);
+        }
+      }
+      const owned = Object.keys(inventory)
+        .map(Number)
+        .filter(id => canHotbar(id) && inventory[id] > 0 && !seen.has(id))
+        .sort((a, b) => {
+          const blockA = BLOCKS[a] ? 0 : 1;
+          const blockB = BLOCKS[b] ? 0 : 1;
+          return blockA - blockB || a - b;
+        });
+      for (const id of owned) {
+        const slot = hotbar.indexOf(null);
+        if (slot < 0) break;
+        hotbar[slot] = id;
+        seen.add(id);
+      }
+      if (selected >= HOTBAR_SIZE) selected = HOTBAR_SIZE - 1;
+    }
+    function selectedItem() {
+      normalizeHotbar();
+      return hotbar[selected] || null;
+    }
+    function selectedAttackDamage() {
+      const id = selectedItem();
+      return id ? itemDamage(id) : ATTACK_DAMAGE;
+    }
+    function assignSelectedHotbar(id) {
+      id = Number(id);
+      if (!canHotbar(id) || (inventory[id] || 0) <= 0) return;
+      const existing = hotbar.indexOf(id);
+      if (existing >= 0) {
+        selected = existing;
+      } else {
+        hotbar[selected] = id;
+      }
+      renderHotbar();
+      updateInfo(0);
+    }
+    function restoreHotbar(saved = []) {
+      hotbar.fill(null);
+      saved.slice(0, HOTBAR_SIZE).forEach((id, i) => {
+        const n = Number(id);
+        if (canHotbar(n)) hotbar[i] = n;
+      });
+      normalizeHotbar();
+    }
     const hud = createHud({
       player,
       inventory,
-      placeable: PLACEABLE,
-      blocks: BLOCKS,
+      hotbar,
+      itemName,
+      itemColor,
+      itemTexturePath,
       maxHealth: MAX_HEALTH,
       maxHunger: MAX_HUNGER,
     });
@@ -438,16 +694,19 @@ const net = new Net();
     // ===== 箱子存储 UI =====
     let openChestKey = null;
     function openChest(x, y, z) {
+      if (craftOpen) closeCraft(false);
+      if (furnaceOpen) closeFurnace(false);
+      if (bagOpen) closeBag(false);
       openChestKey = keyOf(x, y, z);
       if (!chests[openChestKey]) chests[openChestKey] = {};
       renderChest();
       chestEl.classList.remove('hidden');
       document.exitPointerLock();
     }
-    function closeChest() {
+    function closeChest(requestLock = true) {
       openChestKey = null;
       chestEl.classList.add('hidden');
-      canvas.requestPointerLock();
+      if (requestLock) canvas.requestPointerLock();
     }
     // 渲染箱子+背包两行，点击在两者间转移一个
     function renderChest() {
@@ -456,7 +715,7 @@ const net = new Net();
       const mkSlot = (id, count, onClick) => {
         const s = document.createElement('div'); s.className = 'cslot';
         const sw = document.createElement('div'); sw.className = 'sw';
-        sw.style.background = '#' + itemColor(id).toString(16).padStart(6, '0');
+        paintItemIcon(sw, id);
         const c = document.createElement('span'); c.className = 'cnt'; c.textContent = count;
         s.appendChild(sw); s.appendChild(c);
         s.addEventListener('click', onClick);
@@ -488,23 +747,29 @@ const net = new Net();
     function renderHunger() { hud.renderHunger(); }
 
     let craftOpen = false;
+    let craftOpenAtTable = false;
     let nearTable = false; // 附近是否有工作台
 
     // 检查某配方当前能否合成（库存够 + 工作台条件满足）
     function canCraft(r) {
-      return canCraftRecipe(r, nearTable);
+      return canCraftRecipe(r, nearTable || craftOpenAtTable);
     }
     // 执行合成：扣材料、加产物
     function doCraft(r) {
-      if (!craftRecipe(r, nearTable)) return;
+      if (!craftRecipe(r, nearTable || craftOpenAtTable)) return;
       playSound('pickup');
       renderHotbar();
       renderCraft();
+      if (bagOpen) renderBag();
     }
 
     // 渲染合成面板：列出所有配方，可合成的高亮、缺料的置灰
     const craftEl = document.getElementById('craft');
     const craftListEl = document.getElementById('craftList');
+    const craftTitleEl = document.getElementById('craftTitle');
+    const craftHintEl = document.getElementById('craftHint');
+    const furnaceEl = document.getElementById('furnace');
+    const furnaceListEl = document.getElementById('furnaceList');
 
     // ===== 背包面板 =====
     const bagEl = document.getElementById('bag');
@@ -526,7 +791,7 @@ const net = new Net();
         slot.className = 'bslot';
         const sw = document.createElement('div');
         sw.className = 'sw';
-        sw.style.background = '#' + itemColor(id).toString(16).padStart(6, '0');
+        paintItemIcon(sw, id);
         const nm = document.createElement('div');
         nm.className = 'nm';
         const food = ITEMS[id]?.food;
@@ -535,30 +800,94 @@ const net = new Net();
         cnt.className = 'cnt';
         cnt.textContent = inventory[id];
         slot.appendChild(sw); slot.appendChild(nm); slot.appendChild(cnt);
-        // 点击：是食物则吃掉回饥饿
+        slot.title = '点击放入当前快捷格';
         if (food) {
-          slot.title = '点击食用，回 ' + food + ' 点饥饿';
+          slot.title = '饥饿未满时点击食用；否则放入当前快捷格';
           slot.addEventListener('click', () => {
             if (inventory[id] > 0 && player.hunger < MAX_HUNGER) {
               removeFromInventory(id, 1);
               player.hunger = Math.min(MAX_HUNGER, player.hunger + food);
               renderHunger(); renderBag(); renderHotbar();
+            } else {
+              assignSelectedHotbar(id);
             }
           });
+        } else {
+          slot.addEventListener('click', () => assignSelectedHotbar(id));
         }
         bagGridEl.appendChild(slot);
       }
     }
+    function openBag() {
+      if (craftOpen) closeCraft(false);
+      if (furnaceOpen) closeFurnace(false);
+      if (openChestKey) closeChest(false);
+      bagOpen = true;
+      renderBag();
+      bagEl.classList.remove('hidden');
+      document.exitPointerLock();
+    }
+    function closeBag(requestLock = true) {
+      bagOpen = false;
+      bagEl.classList.add('hidden');
+      if (requestLock) canvas.requestPointerLock();
+    }
     function toggleBag() {
-      bagOpen = !bagOpen;
-      if (bagOpen) {
-        renderBag();
-        bagEl.classList.remove('hidden');
-        document.exitPointerLock();
-      } else {
-        bagEl.classList.add('hidden');
-        canvas.requestPointerLock();
+      if (bagOpen) closeBag();
+      else openBag();
+    }
+
+    let furnaceOpen = false;
+    function renderFurnace() {
+      furnaceListEl.textContent = '';
+      for (const r of FURNACE_RECIPES) {
+        const ok = canSmeltRecipe(r);
+        const row = document.createElement('div');
+        row.className = 'recipe ' + (ok ? 'ok' : 'no');
+        const input = document.createElement('div');
+        input.className = 'sw';
+        paintItemIcon(input, r.input);
+        const arrow = document.createElement('div');
+        arrow.className = 'arrow';
+        arrow.textContent = '+';
+        const fuel = document.createElement('div');
+        fuel.className = 'sw';
+        paintItemIcon(fuel, r.fuel);
+        const txt = document.createElement('div');
+        txt.className = 'txt';
+        txt.textContent = `${r.name} -> ${itemName(r.output)} ×${r.count}`;
+        const need = document.createElement('div');
+        need.className = 'need';
+        need.textContent = `需要: ${itemName(r.input)}×1 + ${itemName(r.fuel)}×1`;
+        txt.appendChild(need);
+        row.appendChild(input);
+        row.appendChild(arrow);
+        row.appendChild(fuel);
+        row.appendChild(txt);
+        if (ok) row.addEventListener('click', () => doSmelt(r));
+        furnaceListEl.appendChild(row);
       }
+    }
+    function doSmelt(recipe) {
+      if (!smeltRecipe(recipe)) return;
+      playSound('smelt');
+      renderHotbar();
+      renderFurnace();
+      if (bagOpen) renderBag();
+    }
+    function openFurnace() {
+      if (craftOpen) closeCraft(false);
+      if (bagOpen) closeBag(false);
+      if (openChestKey) closeChest(false);
+      furnaceOpen = true;
+      renderFurnace();
+      furnaceEl.classList.remove('hidden');
+      document.exitPointerLock();
+    }
+    function closeFurnace(requestLock = true) {
+      furnaceOpen = false;
+      furnaceEl.classList.add('hidden');
+      if (requestLock) canvas.requestPointerLock();
     }
 
     function renderCraft() {
@@ -567,33 +896,61 @@ const net = new Net();
         const ok = canCraft(r);
         const row = document.createElement('div');
         row.className = 'recipe ' + (ok ? 'ok' : 'no');
+        const grid = document.createElement('div');
+        grid.className = 'grid';
+        for (let gy = 0; gy < 3; gy++) {
+          for (let gx = 0; gx < 3; gx++) {
+            const cell = document.createElement('div');
+            cell.className = 'cell';
+            const id = r.grid?.[gy]?.[gx] || 0;
+            if (id) paintItemIcon(cell, id);
+            grid.appendChild(cell);
+          }
+        }
         const sw = document.createElement('div');
         sw.className = 'sw';
-        sw.style.background = '#' + itemColor(r.output).toString(16).padStart(6, '0');
+        paintItemIcon(sw, r.output);
         const txt = document.createElement('div');
         txt.className = 'txt';
         const needs = Object.entries(r.inputs)
           .map(([id, n]) => `${itemName(id)}×${n}`).join(' + ');
+        const badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = r.table ? '3×3' : '2×2';
         txt.textContent = `${r.name} ×${r.count}`;
         const need = document.createElement('div');
         need.className = 'need';
-        need.textContent = `需要: ${needs}${r.table ? ' · 工作台' : ''}`;
+        need.textContent = `需要: ${needs}${r.table ? ' · 需要工作台' : ''}`;
+        txt.appendChild(badge);
         txt.appendChild(need);
-        row.appendChild(sw); row.appendChild(txt);
+        row.appendChild(grid); row.appendChild(sw); row.appendChild(txt);
         if (ok) row.addEventListener('click', () => doCraft(r));
         craftListEl.appendChild(row);
       }
     }
+    function openCraft(fromTable = false) {
+      if (furnaceOpen) closeFurnace(false);
+      if (bagOpen) closeBag(false);
+      if (openChestKey) closeChest(false);
+      craftOpen = true;
+      craftOpenAtTable = fromTable;
+      if (craftTitleEl) craftTitleEl.textContent = fromTable ? '工作台' : '合成';
+      if (craftHintEl) craftHintEl.textContent = fromTable
+        ? '工作台 3×3 配方可用 · E 关闭'
+        : '随身 2×2 配方可用 · 靠近或右键工作台解锁 3×3';
+      renderCraft();
+      craftEl.classList.remove('hidden');
+      document.exitPointerLock();
+    }
+    function closeCraft(requestLock = true) {
+      craftOpen = false;
+      craftOpenAtTable = false;
+      craftEl.classList.add('hidden');
+      if (requestLock) canvas.requestPointerLock();
+    }
     function toggleCraft() {
-      craftOpen = !craftOpen;
-      if (craftOpen) {
-        renderCraft();
-        craftEl.classList.remove('hidden');
-        document.exitPointerLock(); // 打开面板时释放鼠标以便点击
-      } else {
-        craftEl.classList.add('hidden');
-        canvas.requestPointerLock();
-      }
+      if (craftOpen) closeCraft();
+      else openCraft(false);
     }
     document.addEventListener('keydown', e => {
       if (!shouldHandleGameKey(e)) return;
@@ -605,6 +962,8 @@ const net = new Net();
       }
       if (e.code === 'KeyE' && !player.dead) {
         if (openChestKey) closeChest();   // 箱子开着时 E 先关箱子
+        else if (furnaceOpen) closeFurnace();
+        else if (craftOpen) closeCraft();
         else toggleCraft();
       }
       // Q 吃食物：在库存里找第一个食物吃掉，回饥饿
@@ -635,6 +994,7 @@ const net = new Net();
         worldD: WORLD_D,
         maxHealth: MAX_HEALTH,
       });
+      placePlayerAtSpawn();
       if (!net.isClient()) {
         clearMobs(ecsWorld);
         ensureMobs(ecsWorld, mobCtx());
@@ -644,19 +1004,23 @@ const net = new Net();
       canvas.requestPointerLock();
     });
 
-    // 渲染热键栏：每个槽位显示方块颜色色块 + 名称 + 持有数量
-    function renderHotbar() { hud.renderHotbar(selected); }
+    // 渲染 9 格快捷栏：只显示当前拥有且可使用的物品
+    function renderHotbar() {
+      normalizeHotbar();
+      hud.renderHotbar(selected);
+    }
 
-    // 数字键 1-7 选方块；滚轮循环切换
+    // 数字键 1-9 选快捷栏；滚轮循环切换
     document.addEventListener('keydown', e => {
       if (!shouldHandleGameKey(e)) return;
       const n = parseInt(e.key, 10);
-      if (n >= 1 && n <= PLACEABLE.length) { selected = n - 1; renderHotbar(); }
+      if (n >= 1 && n <= HOTBAR_SIZE) { selected = n - 1; renderHotbar(); updateInfo(0); }
     });
     document.addEventListener('wheel', e => {
-      if (!locked) return;
-      selected = (selected + (e.deltaY > 0 ? 1 : -1) + PLACEABLE.length) % PLACEABLE.length;
+      if (!locked || player.dead) return;
+      selected = (selected + (e.deltaY > 0 ? 1 : -1) + HOTBAR_SIZE) % HOTBAR_SIZE;
       renderHotbar();
+      updateInfo(0);
     });
 
     // 点击遮罩进入游戏（请求指针锁定 + 启动音频，需用户手势）
@@ -665,10 +1029,11 @@ const net = new Net();
     const newGameBtnEl = document.getElementById('newGameBtn');
     const hostBtnEl = document.getElementById('hostBtn');
     const joinBtnEl = document.getElementById('joinBtn');
+    const nameInputEl = document.getElementById('nameInput');
     const roomInputEl = document.getElementById('roomInput');
     const netMsgEl = document.getElementById('netMsg');
     const netbarEl = document.getElementById('netbar');
-    const noStart = new Set([seedInputEl, newGameBtnEl, hostBtnEl, joinBtnEl, roomInputEl]);
+    const noStart = new Set([seedInputEl, newGameBtnEl, hostBtnEl, joinBtnEl, nameInputEl, roomInputEl]);
     overlay.addEventListener('click', (e) => {
       if (noStart.has(e.target)) return; // 这些有自己的处理
       initAudio();
@@ -730,6 +1095,7 @@ const net = new Net();
       updateNetbar,
       getSeed: () => currentSeed,
       setSeed: seed => { currentSeed = seed; },
+      getPlayerName: () => net.displayName,
       getGameTime: () => gameTime,
       setGameTime: value => { gameTime = value; },
       attackDamage: ATTACK_DAMAGE,
@@ -739,6 +1105,7 @@ const net = new Net();
     hostBtnEl.addEventListener('click', (e) => {
       e.stopPropagation();
       if (typeof window.Peer === 'undefined') { netMsg('PeerJS 未加载，检查网络'); return; }
+      net.setDisplayName(nameInputEl.value || '房主');
       netMsg('正在创建房间…');
       net.host((roomId) => {
         netSession.markReady();
@@ -752,6 +1119,7 @@ const net = new Net();
       if (typeof window.Peer === 'undefined') { netMsg('PeerJS 未加载，检查网络'); return; }
       const room = roomInputEl.value.trim().toUpperCase();
       if (room.length < 4) { netMsg('请输入房间号'); return; }
+      net.setDisplayName(nameInputEl.value || '玩家');
       netMsg('正在加入 ' + room + ' …');
       netSession.setupClientHandlers(() => netMsg('世界已同步，点击开始'));
       net.join(room, () => { netMsg('已连接，等待世界…'); });
@@ -760,10 +1128,11 @@ const net = new Net();
     function updateInfo(dt) {
       hud.updateInfo(selected, dt);
     }
+    const emptyKeys = {};
 
     // ===== 主循环 =====
     // 每帧：根据按键算出水平移动方向，施加重力，分轴碰撞，更新相机，渲染。
-    function update(dt) {
+    function update(dt, controlsActive = true) {
       gameTime += dt;
 
       // 死亡时停止一切移动，只保持相机
@@ -773,7 +1142,8 @@ const net = new Net();
         return;
       }
 
-      updatePlayer(player, dt, keys, gameTime, {
+      updatePlayer(player, dt, controlsActive ? keys : emptyKeys, gameTime, {
+        gameTime,
         worldW: WORLD_W,
         worldH: WORLD_H,
         worldD: WORLD_D,
@@ -783,12 +1153,20 @@ const net = new Net();
         sprintMult: SPRINT_MULT,
         gravity: GRAVITY,
         jumpSpeed: JUMP_SPEED,
+        waterMoveMult: 0.58,
+        swimAccel: 13,
+        waterRiseSpeed: 2.8,
+        waterMaxRiseSpeed: 4.4,
+        waterExitStep: 1.45,
+        safeFallDistance: SAFE_FALL_DISTANCE,
+        fallDamagePerBlock: FALL_DAMAGE_PER_BLOCK,
         hungerDecay: HUNGER_DECAY,
         starveDamage: STARVE_DAMAGE,
         maxHealth: MAX_HEALTH,
         regenDelay: REGEN_DELAY,
         regenRate: REGEN_RATE,
         isSolidAt,
+        surfaceY,
         getBlock,
         isClimbable,
         onHurt: () => {
@@ -831,6 +1209,7 @@ const net = new Net();
       });
 
       // 2.8) 打击感：手臂挥动、命中标记、怪物受击闪红
+      updateMining(dt);
       hand.update(dt);
       updateHitMarker(dt);
       updateFlashSystem(ecsWorld, dt, {
@@ -838,7 +1217,7 @@ const net = new Net();
         animalTypes: ANIMAL_TYPES,
         gameTime,
       });
-      syncMeshSystem(ecsWorld, { player, dt });
+      syncMeshSystem(ecsWorld, { player, dt, gameTime });
 
       // 3) 更新相机
       camera.position.copy(player.pos);
@@ -847,22 +1226,40 @@ const net = new Net();
 
     let last = performance.now();
     let lastAutoSave = 0; // 上次自动存档的 gameTime
+    let fluidTick = 0;
     function animate(now) {
       try {
         const dt = Math.min((now - last) / 1000, 0.05); // 限制最大步长，防卡顿穿墙
         last = now;
-        if (locked) update(dt);
+        const simulating = locked || bagOpen || craftOpen || furnaceOpen || openChestKey !== null;
+        if (simulating) update(dt, locked);
+        if (simulating && !net.isClient()) {
+          fluidTick += dt;
+          if (fluidTick > 0.35) {
+            fluidTick = 0;
+            const fluidChanges = updateFluidPhysics();
+            if (net.isHost()) {
+              for (const change of fluidChanges) net.broadcast(MSG.BLOCK, change);
+            }
+          }
+        }
         netSession.netTick(dt); // 联机同步（即使未锁定也插值远程玩家）
         // 昼夜与云持续运转（即使玩家死亡，世界依然流动）
         dayCycle.update(dt);
         clouds.update(dt);
+        const weatherState = weather.update(dt);
+        if (weatherState.lightning > 0) {
+          scene.background = new THREE.Color(0xddeeff);
+          if (scene.fog) scene.fog.color.setHex(0xddeeff);
+        }
+        updateWaterFeedback(dt);
         particles.update(dt, GRAVITY); // 推进粒子
         // 纹理缓动：让方块表面颗粒微微流动，制造"活"的氛围
         updateBlockTexture(dt);
         updateDamageTexts(dt); // 伤害飘字淡出
         updateInfo(dt);
         // 自动存档：每 30 秒一次（游戏进行中且未死亡）
-        if (locked && !player.dead && gameTime - lastAutoSave > 30) {
+        if (simulating && !player.dead && gameTime - lastAutoSave > 30) {
           lastAutoSave = gameTime;
           doSave();
         }
@@ -891,6 +1288,7 @@ const net = new Net();
         maxHealth: MAX_HEALTH,
         maxHunger: MAX_HUNGER,
       });
+      placePlayerAtSpawn();
       dayCycle.reset(0.15); gameTime = 0;
       // 清空各容器
       clearBlockState();
@@ -899,6 +1297,7 @@ const net = new Net();
       clearAnimals(ecsWorld);
       setNextNetId(1);
       giveStartingInventory();
+      restoreHotbar([]);
       rebuildTerrain();
       refreshAllUI();
     }
@@ -920,17 +1319,42 @@ const net = new Net();
         xp: data.player.xp, level: data.player.level,
         yaw: data.player.yaw, pitch: data.player.pitch, dead: false,
       });
-      player.pos.set(data.player.px, data.player.py, data.player.pz);
+      const px = Number(data.player.px);
+      const py = Number(data.player.py);
+      const pz = Number(data.player.pz);
+      const lx = Number.isFinite(px) ? Math.max(0, Math.min(WORLD_W - 1, Math.floor(px))) : 0;
+      const lz = Number.isFinite(pz) ? Math.max(0, Math.min(WORLD_D - 1, Math.floor(pz))) : 0;
+      const expectedGroundPos = surfaceY(lx, lz) + PLAYER_HEIGHT + 0.05;
+      let hasSupportBelow = false;
+      if (Number.isFinite(py)) {
+        const footY = Math.floor(py - PLAYER_HEIGHT);
+        for (let yy = footY; yy >= Math.max(0, footY - 12); yy--) {
+          if (isSolidAt(lx, yy, lz)) { hasSupportBelow = true; break; }
+        }
+      }
+      if (
+        Number.isFinite(px) && Number.isFinite(py) && Number.isFinite(pz) &&
+        px >= 0 && px < WORLD_W && pz >= 0 && pz < WORLD_D &&
+        py > -5 && py < WORLD_H + PLAYER_HEIGHT + 8 &&
+        (py < expectedGroundPos + 12 || hasSupportBelow)
+      ) {
+        player.pos.set(px, py, pz);
+      } else {
+        placePlayerAtSpawn();
+      }
       player.vel.set(0, 0, 0);
+      player.fallStartY = player.pos.y;
       dayCycle.setTime(data.time?.dayTime ?? 0.15);
       gameTime = data.time?.gameTime ?? 0;
       restoreInventory(data.inventory || {});
+      restoreHotbar(data.hotbar || []);
       restoreBlockState(data.blockState);
       hydrateEcs(data.ecs, { clearDrops, world: ecsWorld });
       refreshAllUI();
     }
 
     function refreshAllUI() {
+      normalizeHotbar();
       hud.renderAll(selected);
     }
 
@@ -945,6 +1369,7 @@ const net = new Net();
         },
         blockState: snapshotBlockState(),
         inventory,
+        hotbar: hotbar.slice(),
         time: { dayTime: dayCycle.getTime(), gameTime },
         ecs: snapshotEcs(ecsWorld),
       };

@@ -55,3 +55,43 @@ export function updateCreaturePhysics(eid, dt, ctx, moveX = 0, moveZ = 0) {
 
   return Position.y[eid] < -20;
 }
+
+export function verticalOverlapWithPlayer(eid, ctx) {
+  const entityBottom = Position.y[eid] - Body.height[eid];
+  const entityTop = Position.y[eid];
+  const playerBottom = ctx.player.pos.y - ctx.playerHeight;
+  const playerTop = ctx.player.pos.y;
+  return Math.min(entityTop, playerTop) - Math.max(entityBottom, playerBottom);
+}
+
+export function distanceToPlayer3D(eid, ctx) {
+  const dy = (Position.y[eid] - Body.height[eid] * 0.5) -
+    (ctx.player.pos.y - ctx.playerHeight * 0.5);
+  return Math.hypot(Position.x[eid] - ctx.player.pos.x, dy, Position.z[eid] - ctx.player.pos.z);
+}
+
+export function separateEntityFromPlayer(eid, ctx) {
+  if (!ctx.player || !ctx.playerRadius || !ctx.playerHeight || ctx.player.dead) return false;
+  if (verticalOverlapWithPlayer(eid, ctx) <= 0.05) return false;
+
+  let dx = Position.x[eid] - ctx.player.pos.x;
+  let dz = Position.z[eid] - ctx.player.pos.z;
+  let dist = Math.hypot(dx, dz);
+  if (dist < 0.001) {
+    dx = Math.sin((Position.x[eid] + Position.z[eid]) * 12.9898);
+    dz = Math.cos((Position.x[eid] - Position.z[eid]) * 78.233);
+    dist = Math.hypot(dx, dz);
+  }
+
+  const minDist = Body.radius[eid] + ctx.playerRadius + (ctx.creaturePersonalSpace ?? 0.18);
+  if (dist >= minDist) return false;
+
+  const push = minDist - dist;
+  const nx = dx / dist;
+  const nz = dz / dist;
+  moveEntityAxis(eid, 'x', nx * push, ctx);
+  moveEntityAxis(eid, 'z', nz * push, ctx);
+  Velocity.x[eid] += nx * 0.8;
+  Velocity.z[eid] += nz * 0.8;
+  return true;
+}

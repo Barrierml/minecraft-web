@@ -5,11 +5,22 @@ function colorHex(color) {
   return '#' + color.toString(16).padStart(6, '0');
 }
 
+function paintIcon(el, id, color, itemTexturePath) {
+  el.style.backgroundColor = colorHex(color);
+  const texture = itemTexturePath?.(id);
+  if (!texture) return;
+  el.style.backgroundImage = `url("${texture}")`;
+  el.style.backgroundSize = 'cover';
+  el.style.backgroundPosition = 'center';
+}
+
 export function createHud({
   player,
   inventory,
-  placeable,
-  blocks,
+  hotbar,
+  itemName,
+  itemColor,
+  itemTexturePath,
   maxHealth,
   maxHunger,
 }) {
@@ -54,13 +65,16 @@ export function createHud({
 
   function renderHotbar(selected) {
     hotbarEl.textContent = '';
-    placeable.forEach((id, i) => {
-      const count = inventory[id] || 0;
+    hotbar.forEach((id, i) => {
+      const count = id ? (inventory[id] || 0) : 0;
       const slot = document.createElement('div');
       slot.className = 'slot' + (i === selected ? ' active' : '') + (count === 0 ? ' empty' : '');
+      const key = document.createElement('span');
+      key.className = 'key';
+      key.textContent = i + 1;
       const sw = document.createElement('div');
       sw.className = 'sw';
-      sw.style.background = colorHex(blocks[id].top);
+      if (id) paintIcon(sw, id, itemColor(id), itemTexturePath);
       if (count > 0) {
         const cnt = document.createElement('span');
         cnt.className = 'count';
@@ -68,7 +82,8 @@ export function createHud({
         sw.appendChild(cnt);
       }
       const label = document.createElement('span');
-      label.textContent = (i + 1) + ' ' + blocks[id].name;
+      label.textContent = id ? itemName(id) : '空';
+      slot.appendChild(key);
       slot.appendChild(sw);
       slot.appendChild(label);
       hotbarEl.appendChild(slot);
@@ -80,8 +95,10 @@ export function createHud({
     if (!force && infoTimer < 0.1) return;
     infoTimer = 0;
     const p = player.pos;
+    const selectedId = hotbar[selected];
+    const selectedName = selectedId ? itemName(selectedId) : '空手';
     const text = `坐标 ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}\n` +
-      `当前方块: ${blocks[placeable[selected]].name}`;
+      `当前手持: ${selectedName}`;
     if (text !== lastInfo) {
       infoEl.textContent = text;
       lastInfo = text;

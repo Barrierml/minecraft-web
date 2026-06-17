@@ -4,7 +4,12 @@
 import { Body, Health, Mob, NetIdentity, Position, Velocity, getMesh } from '../components.js';
 import { getMobTypeKey, removeEcsEntity, reserveNetId, spawnMob } from '../factories.js';
 import { queries } from '../world.js';
-import { updateCreaturePhysics } from './physics.js';
+import {
+  distanceToPlayer3D,
+  separateEntityFromPlayer,
+  updateCreaturePhysics,
+  verticalOverlapWithPlayer,
+} from './physics.js';
 
 export function isNight(ctx) {
   return ctx.dayCycle.isNight();
@@ -83,25 +88,36 @@ export function updateMobsSystem(world, dt, ctx) {
     const type = getMobTypeKey(eid);
     const t = ctx.mobTypes[type];
     Mob.attackCd[eid] -= dt;
+    Mob.soundCd[eid] -= dt;
 
     const dx = ctx.player.pos.x - Position.x[eid];
     const dz = ctx.player.pos.z - Position.z[eid];
     const dist = Math.hypot(dx, dz);
+    if (!ctx.player.dead && dist < 18 && Mob.soundCd[eid] <= 0) {
+      ctx.playSound(type === 'zombie' ? 'zombie' : type === 'skeleton' ? 'skeleton' : 'creeper');
+      Mob.soundCd[eid] = 5 + Math.random() * 9;
+    }
     let moveX = 0;
     let moveZ = 0;
     if (!ctx.player.dead && dist < ctx.sight && dist > 0.01) {
       const nx = dx / dist;
       const nz = dz / dist;
-      moveX = nx * t.speed;
-      moveZ = nz * t.speed;
+      const stopDistance = ctx.playerRadius + Body.radius[eid] + 0.35;
+      if (dist > stopDistance) {
+        moveX = nx * t.speed;
+        moveZ = nz * t.speed;
+      }
     }
 
     if (updateCreaturePhysics(eid, dt, ctx, moveX, moveZ)) {
       removeEcsEntity(eid);
       continue;
     }
+    separateEntityFromPlayer(eid, ctx);
 
-    if (!ctx.player.dead && dist < 2.2) {
+    const attackOverlap = verticalOverlapWithPlayer(eid, ctx) > 0.25;
+    const dist3 = distanceToPlayer3D(eid, ctx);
+    if (!ctx.player.dead && attackOverlap && dist3 < 2.2) {
       if (t.explode) {
         if (Mob.fuse[eid] < 0) {
           Mob.fuse[eid] = 1.2;
@@ -109,7 +125,7 @@ export function updateMobsSystem(world, dt, ctx) {
         }
         Mob.fuse[eid] -= dt;
         if (Mob.fuse[eid] <= 0) {
-          const dmg = Math.max(2, Math.round(t.damage * (1 - dist / 3)));
+          const dmg = Math.max(2, Math.round(t.damage * (1 - dist3 / 3)));
           ctx.damagePlayer(dmg);
           ctx.spawnDamageText(dmg, true);
           ctx.playSound('explode');
@@ -117,11 +133,11 @@ export function updateMobsSystem(world, dt, ctx) {
           killMob(eid, ctx);
           continue;
         }
-      } else if (dist < 1.6 && Mob.attackCd[eid] <= 0) {
+      } else if (dist3 < 1.6 && Mob.attackCd[eid] <= 0) {
         Mob.attackCd[eid] = ctx.attackCooldown;
         ctx.damagePlayer(t.damage);
         ctx.spawnDamageText(t.damage, true);
-        ctx.playSound('hurt');
+        ctx.playSound(type === 'skeleton' ? 'boneHit' : 'hurt');
       }
     } else if (t.explode && Mob.fuse[eid] >= 0) {
       Mob.fuse[eid] = -1;
@@ -142,6 +158,7 @@ export function snapshotMobs(world) {
     vz: Velocity.z[eid],
     h: Health.hp[eid],
     attackCd: Mob.attackCd[eid],
+    soundCd: Mob.soundCd[eid],
     fuse: Mob.fuse[eid],
   }));
 }
@@ -163,6 +180,7 @@ export function hydrateMobs(list, ctx) {
     Velocity.z[eid] = d.vz || 0;
     Health.hp[eid] = d.h ?? Health.max[eid];
     Mob.attackCd[eid] = d.attackCd || 0;
+    Mob.soundCd[eid] = d.soundCd || 2 + Math.random() * 5;
     Mob.fuse[eid] = d.fuse ?? -1;
     const mesh = getMesh(eid);
     if (mesh) mesh.position.set(Position.x[eid], Position.y[eid] - Body.height[eid], Position.z[eid]);
