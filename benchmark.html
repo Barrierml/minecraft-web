@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Minecraft Benchmark</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #050608;
+    color: #f4f7fb;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  #c {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  #benchPanel {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    bottom: 16px;
+    z-index: 50;
+    width: min(720px, calc(100vw - 32px));
+    display: grid;
+    grid-template-rows: auto auto auto 1fr;
+    gap: 10px;
+    padding: 14px;
+    background: rgba(8, 12, 16, 0.86);
+    border: 1px solid rgba(180, 210, 255, 0.24);
+    border-radius: 8px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.42);
+  }
+  #benchPanel h1 {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0;
+  }
+  #benchStatus {
+    min-height: 28px;
+    padding: 7px 9px;
+    color: #b8e7ff;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  #benchControls {
+    display: grid;
+    gap: 10px;
+    min-height: 0;
+    max-height: 36vh;
+    overflow: auto;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+  }
+  #benchControls .controlGrid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+  #benchControls label {
+    display: grid;
+    gap: 4px;
+    color: #bac6d4;
+    font-size: 11px;
+    line-height: 1.2;
+  }
+  #benchControls input {
+    width: 100%;
+    min-width: 0;
+    padding: 7px 8px;
+    color: #f4f7fb;
+    background: rgba(0, 0, 0, 0.36);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 5px;
+    font: inherit;
+    font-size: 12px;
+  }
+  #benchControls .wide {
+    grid-column: span 2;
+  }
+  #benchControls .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+  #benchControls button {
+    padding: 7px 10px;
+    color: #f4f7fb;
+    background: rgba(184, 231, 255, 0.16);
+    border: 1px solid rgba(184, 231, 255, 0.35);
+    border-radius: 5px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #benchControls button.primary {
+    color: #051018;
+    background: #b8e7ff;
+    border-color: #b8e7ff;
+    font-weight: 700;
+  }
+  #benchReport {
+    min-height: 0;
+    overflow: auto;
+    white-space: pre-wrap;
+    color: #e8edf5;
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 10px;
+    background: rgba(0, 0, 0, 0.38);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+  }
+  @media (max-width: 720px) {
+    #benchPanel {
+      left: 10px;
+      right: 10px;
+      top: auto;
+      bottom: 10px;
+      width: auto;
+      max-height: 58vh;
+    }
+    #benchControls .controlGrid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+</style>
+</head>
+<body data-benchmark="true">
+  <canvas id="c"></canvas>
+
+  <section id="benchPanel" aria-label="Benchmark report">
+    <h1>Mini Minecraft Benchmark</h1>
+    <div id="benchStatus">Loading benchmark...</div>
+    <form id="benchControls">
+      <div class="controlGrid">
+        <label class="wide">Title
+          <input name="title" type="text">
+        </label>
+        <label>Seed
+          <input name="seed" type="text">
+        </label>
+        <label>Stress 0-5
+          <input name="stress" type="number" min="0" max="5" step="0.1">
+        </label>
+        <label>Duration s
+          <input name="duration" type="number" min="1" max="300" step="1">
+        </label>
+        <label>Warmup s
+          <input name="warmup" type="number" min="0" max="30" step="1">
+        </label>
+        <label>Time 0-1
+          <input name="time" type="number" min="0" max="1" step="0.01">
+        </label>
+        <label>Camera height
+          <input name="height" type="number" min="2" max="40" step="0.5">
+        </label>
+        <label>Camera loops
+          <input name="loops" type="number" min="0.25" max="12" step="0.25">
+        </label>
+        <label>Extra mobs
+          <input name="extraMobs" type="number" min="0" max="120" step="1">
+        </label>
+        <label>Extra animals
+          <input name="extraAnimals" type="number" min="0" max="120" step="1">
+        </label>
+        <label>Drops
+          <input name="drops" type="number" min="0" max="300" step="1">
+        </label>
+        <label>Props
+          <input name="props" type="number" min="0" max="600" step="1">
+        </label>
+        <label>Lights
+          <input name="lights" type="number" min="0" max="40" step="1">
+        </label>
+        <label>Particle rate
+          <input name="particleRate" type="number" min="0" max="20" step="0.25">
+        </label>
+        <label>Particle size
+          <input name="particleSize" type="number" min="1" max="80" step="1">
+        </label>
+      </div>
+      <div class="actions">
+        <button class="primary" id="runBenchBtn" type="submit">Run benchmark</button>
+        <button type="button" data-preset="0">Light</button>
+        <button type="button" data-preset="1.5">Default</button>
+        <button type="button" data-preset="3">Heavy</button>
+        <button type="button" data-preset="5">Max stress</button>
+      </div>
+    </form>
+    <pre id="benchReport">Report will appear here when the run finishes.</pre>
+  </section>
+
+  <script>
+    window.__MINIMC_BENCHMARK__ = true;
+    window.__MINIMC_BENCHMARK_CONFIG__ = {
+      duration: 30,
+      warmup: 2,
+      stress: 1.5,
+      title: 'Mini Minecraft Benchmark'
+    };
+  </script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "bitecs": "https://unpkg.com/bitecs@0.4.0/dist/core/index.min.mjs"
+    }
+  }
+  </script>
+  <script type="module" src="./src/benchmarkPage.js"></script>
+</body>
+</html>
